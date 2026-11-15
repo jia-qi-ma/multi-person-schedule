@@ -1,0 +1,5 @@
+{
+  "success": false,
+  "error": "date 必须是 YYYY-MM-DD 格式",
+  "code": "INVALID_DATE"
+}
