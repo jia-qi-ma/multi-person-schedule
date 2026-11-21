@@ -1,0 +1,37 @@
+# 多人时间表 · 后端服务定义（systemd）
+#
+# 用法：
+#   ln -s /opt/multi-person-schedule/deploy/scheduler.service /etc/systemd/system/scheduler.service
+#   systemctl daemon-reload
+#   systemctl enable --now scheduler
+#   systemctl status scheduler --no-pager
+#
+# 改了这个文件之后必须 daemon-reload，否则 systemd 用的还是内存里那份旧配置。
+#
+# 为什么需要它：手动 `node src/index.js` 有三个问题 ——
+#   SSH 一断进程就跟着挂断信号退出；崩了没人拉起；服务器重启后没人记得启动它。
+#   systemd 把这三件事都接过去了。
+
+[Unit]
+Description=Multi-person schedule backend
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+
+# 这一行必须写对。dotenv 是从「当前工作目录」找 .env 的，
+# 不是从代码文件旁边找。写错的话服务能起来，但连不上数据库。
+WorkingDirectory=/opt/multi-person-schedule/backend
+
+# 少了这一行，DATABASE_URL 和 HOST 都进不了进程，启动会立刻失败。
+EnvironmentFile=/opt/multi-person-schedule/backend/.env
+
+ExecStart=/usr/bin/node src/index.js
+
+# 崩了 3 秒后自动拉起。这才叫“常驻”，也是它和“脚本”的区别。
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
