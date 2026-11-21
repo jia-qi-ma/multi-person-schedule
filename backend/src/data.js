@@ -126,4 +126,27 @@ function removeEvent(id) {
   return events.splice(index, 1)[0]
 }
 
-module.exports = { listUsers, listEventsByDate, addUser, findUser, addEvent, removeEvent }
+/**
+ * 删一个成员，连带删掉他名下的所有忙碌记录（2026-11-21 拍板）。
+ *
+ * 为什么级联：忙碌记录靠 userId 依附于成员，人没了记录就无所归属。
+ * 代价是「删人」比看上去重 —— 他占的时段一起消失，共同空闲会变多，
+ * 所以前端删之前要二次确认，这句也写进了契约的「删除成员的口径」。
+ *
+ * 删不到返回 null，回什么错误由上层决定（跟 removeEvent 一个套路）。
+ */
+function removeUser(id) {
+  const index = users.findIndex((u) => u.id === id)
+  if (index === -1) return null
+  const [removed] = users.splice(index, 1)
+
+  // 用 filter 重建再原地写回：边遍历边 splice 会漏掉紧跟其后的那一条。
+  // events 是 const，不能整个换成新数组，所以清空后 push 回去。
+  const kept = events.filter((e) => e.userId !== id)
+  events.length = 0
+  events.push(...kept)
+
+  return removed
+}
+
+module.exports = { listUsers, listEventsByDate, addUser, findUser, addEvent, removeEvent, removeUser }

@@ -9,7 +9,8 @@
  */
 
 const express = require('express')
-const { listUsers, listEventsByDate, addUser, findUser, addEvent, removeEvent } = require('./data')
+const { listUsers, listEventsByDate, addUser, findUser, addEvent, removeEvent, removeUser } =
+  require('./data')
 const { computeFreeSlots } = require('./freeSlots')
 
 const app = express()
@@ -120,6 +121,16 @@ app.post('/api/users', (req, res) => {
   res.status(201).json({ success: true, data: user })
 })
 
+// DELETE /api/users/:id：删成员，连带删掉他名下的忙碌（口径见契约「删除成员」）
+// 响应只回 { id }，不回被连带删掉的那几条 —— 前端写完就重读，不需要明细
+app.delete('/api/users/:id', (req, res) => {
+  const removed = removeUser(req.params.id)
+  if (!removed) {
+    return fail(res, 404, 'NOT_FOUND', `成员「${req.params.id}」不存在`)
+  }
+  res.json({ success: true, data: { id: removed.id } })
+})
+
 // ---------- 忙碌时段 ----------
 
 // GET /api/events?date=：列出某人某天的忙碌，页面列出来才能删
@@ -189,6 +200,23 @@ app.delete('/api/events/:id', (req, res) => {
 // 兜底：路径写错时也回统一形状，不是一个 HTML 报错页
 app.use((req, res) => {
   fail(res, 404, 'NOT_FOUND', '接口不存在')
+})
+
+/**
+ * 错误兜底：express.json() 解析失败时会带着 err 跳到这儿。
+ *
+ * 不接这一层，express 会吐一整页 HTML —— 前端 res.json() 解析不了，
+ * 会被当成「连不上后端」，实际只是 JSON 写坏了，排查方向全错。
+ *
+ * 必须放在所有路由之后，而且必须写满 4 个参数：
+ * express 靠「参数个数是不是 4」来认错误中间件，少一个就变成普通中间件了。
+ */
+app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.parse.failed') {
+    return fail(res, 400, 'INVALID_PARAMETER', '请求体不是合法的 JSON')
+  }
+  console.error(err) // 真的没料到的错，先把栈打出来，再按契约回统一形状
+  fail(res, 500, 'INTERNAL_ERROR', '服务器内部错误')
 })
 
 const PORT = 3001

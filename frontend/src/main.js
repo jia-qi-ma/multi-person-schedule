@@ -1,11 +1,18 @@
-// 日期只写这一处。以后接日期选择器时，把常量换成用户选中的那一天即可。
-const DATE = '2026-11-15'
+/**
+ * 日期不在模块加载时算死，而是每次发请求前现读输入框。
+ * 如果写成 const DATE = ...，页面一打开就定格了 —— 用户之后改日期，
+ * 请求还落在旧的那天，最难查的是它不报错。
+ */
+function currentDate() {
+  return els.datePicker.value
+}
 
-const SLOTS_URL = `/api/free-slots?date=${DATE}`
+const slotsUrl = () => `/api/free-slots?date=${currentDate()}`
+const eventsUrl = () => `/api/events?date=${currentDate()}`
 const USERS_URL = '/api/users'
-const EVENTS_URL = `/api/events?date=${DATE}`
 
 const els = {
+  datePicker: document.querySelector('#date-picker'),
   meta: document.querySelector('#meta'),
   slots: document.querySelector('#slots'),
   users: document.querySelector('#users'),
@@ -56,10 +63,37 @@ async function loadUsers() {
     const dot = document.createElement('span')
     dot.className = 'dot'
     dot.style.background = user.color // color 是纯展示字段，怎么用由前端说了算
-    item.append(dot, user.name)
+
+    const name = document.createElement('span')
+    name.textContent = user.name
+
+    const del = document.createElement('button')
+    del.className = 'del'
+    del.textContent = '删除'
+    del.addEventListener('click', () => removeUser(user.id, user.name))
+
+    item.append(dot, name, del)
     els.users.appendChild(item)
   })
   fillUserOptions(body.data)
+}
+
+/**
+ * 删成员。这不是「删一条记录」那么轻 —— 后端会连带清掉他名下的忙碌，
+ * 而且不可撤销，所以发请求前先用 confirm 把后果说清楚。
+ * 前端这道只是防误点；真正的删除口径在后端，改口径要动后端和契约。
+ */
+async function removeUser(id, name) {
+  const confirmed = confirm(`删除成员「${name}」？他名下的忙碌记录会一起删掉。`)
+  if (!confirmed) return
+
+  const body = await api(`/api/users/${id}`, { method: 'DELETE' })
+  if (!body.success) {
+    setFeedback(els.feedback, body.error, true)
+    return
+  }
+  setFeedback(els.feedback, `已删除 ${name}，他名下的忙碌记录一并清掉`, false)
+  await refresh()
 }
 
 /**
@@ -80,7 +114,7 @@ function fillUserOptions(users) {
 }
 
 async function loadSlots() {
-  const body = await api(SLOTS_URL)
+  const body = await api(slotsUrl())
   els.slots.innerHTML = ''
   if (!body.success) {
     els.slots.textContent = body.error
@@ -96,7 +130,7 @@ async function loadSlots() {
 }
 
 async function loadEvents() {
-  const body = await api(EVENTS_URL)
+  const body = await api(eventsUrl())
   els.events.innerHTML = ''
   if (!body.success) {
     els.events.textContent = body.error
@@ -140,6 +174,8 @@ async function removeEvent(id) {
 
 /** 写完就重读：不把新数据拼进旧数组，一切以后端返回的为准 */
 function refresh() {
+  // 标题上的日期和这一轮请求用的是同一天，不会出现「显示 15 号、查的是 16 号」
+  els.eventDate.textContent = currentDate()
   return Promise.all([loadUsers(), loadSlots(), loadEvents()])
 }
 
@@ -193,7 +229,7 @@ els.eventForm.addEventListener('submit', async (event) => {
     const body = await api('/api/events', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, date: DATE, startTime, endTime, title }),
+      body: JSON.stringify({ userId, date: currentDate(), startTime, endTime, title }),
     })
 
     if (!body.success) {
@@ -210,7 +246,12 @@ els.eventForm.addEventListener('submit', async (event) => {
   }
 })
 
-els.eventDate.textContent = DATE
+els.datePicker.addEventListener('change', () => {
+  // date 输入框允许清空。清空时 `date=` 会被后端判 INVALID_DATE，
+  // 这会儿先不请求，等用户选好某天再说 —— 和表单里挡空名字是同一个思路
+  if (!currentDate()) return
+  refresh()
+})
 
 // 页面打开先拉一次
 refresh()
