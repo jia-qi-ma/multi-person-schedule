@@ -2,6 +2,10 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <!-- 这一行是移动端适配的前提。没有它，手机浏览器会按 980px 的虚拟宽度
+         排版再整体缩小，字和时间轴色块都缩到肉眼难辨。
+         有了它，页面宽度就等于屏幕宽度，后面的媒体查询才有意义。 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>多人时间表 · 共同空闲</title>
     <style>
       /* ============================================================
@@ -328,6 +332,20 @@
       }
       #event-form .hint { flex: 0 0 100%; }
       #event-title { flex: 1 1 8rem; }
+
+      /* ============================================================
+         窄屏（手机）。时间轴左边那条要留给刻度，桌面用 3rem，
+         手机上会把色块挤窄，收到 2.2rem；padding 也收一点，多留出可用宽度。
+         高度 616px 没动：改它要同时动 PX_PER_MIN、.timeline 的 height
+         和渐变里的 44px 三处，漏一处就错位，不在这次范围内。
+         ============================================================ */
+      @media (max-width: 480px) {
+        body { padding: 1.6rem 1rem 3rem; }
+        #whoami { flex-wrap: wrap; }
+        .timeline { margin-left: 2.2rem; }
+        .tick { left: -2.2rem; width: 1.9rem; font-size: 0.66rem; }
+        .block { left: 0.4rem; padding: 0.1rem 0.4rem; }
+      }
     </style>
   </head>
   <body>
