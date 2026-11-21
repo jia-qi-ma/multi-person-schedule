@@ -364,6 +364,18 @@ app.use((err, req, res, next) => {
 
 // 端口可以用环境变量覆盖：自测时开一个临时实例（PORT=3999）就不会跟正在跑的那个抢
 const PORT = Number(process.env.PORT) || 3001
-app.listen(PORT, () => {
-  console.log(`backend 已启动：http://localhost:${PORT}`)
+
+/**
+ * 监听地址。默认 0.0.0.0 表示所有网卡都收 —— 本机开发就该这样，
+ * 否则手机连同一个 WiFi 想打开页面时会一头雾水。
+ *
+ * 部署到服务器时设 HOST=127.0.0.1：后端只对自己的机器开放，
+ * 外面的请求一律进不来，必须经过前面的 nginx。
+ * 这叫「只让网关对外」，是一层白送的保险：哪天有人手滑在防火墙
+ * 放开了 3001 端口，后端也不会直接裸奔在公网上。
+ */
+const HOST = process.env.HOST || '0.0.0.0'
+
+app.listen(PORT, HOST, () => {
+  console.log(`backend 已启动：http://${HOST}:${PORT}`)
 })
