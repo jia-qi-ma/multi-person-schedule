@@ -11,9 +11,44 @@
 
 ## 跑起来
 
-前置：Node.js（本机默认的 v22 即可）
+前置两样：
 
-需要**两个终端窗口**：一个跑后端，一个跑前端。两个都别关，要停服务按 Ctrl+C。
+- **Node.js**（本机默认的 v22 即可）
+- **PostgreSQL 19**，作为本机服务跑在 5432 端口
+
+### 第一次准备（只做一次）
+
+**1. 建库**
+
+```bash
+psql -U postgres -c "CREATE DATABASE scheduler;"
+```
+
+会提示输密码，输入时屏幕不显示任何字符，这是正常的。
+
+**2. 建表并灌入两条基线数据**
+
+```bash
+cd backend
+psql -U postgres -d scheduler -f db/schema.sql
+```
+
+脚本是幂等的：每次都先 `DROP TABLE` 再重建，跑完数据回到两条基线（张三、李四各一条忙碌）。
+
+**3. 配置连接串**
+
+```powershell
+Copy-Item .env.example .env
+```
+
+然后编辑 `backend/.env`，把密码换成安装 PostgreSQL 时给 `postgres` 设的那个。
+
+`.env` 已被 `.gitignore` 挡住，不会进仓库；入库的只有不含密码的 `.env.example`。
+如果密码里有 `@ : / # %`，连接串会被解析错位，需要先做 URL 编码（`@` 写成 `%40`）。
+
+### 每次开发
+
+需要**两个终端窗口**：一个跑后端，一个跑前端。两个都别关，要停服务按 `Ctrl+C`。
 
 **窗口 A（后端）**
 
@@ -35,7 +70,10 @@ npm run dev
 
 终端会显示一个本地地址（通常是 http://localhost:5173/），用浏览器打开它。
 
-**改了 `backend/` 里的代码后，窗口 A 必须 Ctrl+C 重启**，否则跑的还是内存里的老版本。
+**两个容易踩的点：**
+
+- 启动窗口 A 之前，**PostgreSQL 服务必须是跑着的**（Windows 服务名 `postgresql-x64-19`，默认开机自启）。
+- 改了 `backend/` 里的代码后，**窗口 A 必须 `Ctrl+C` 重启**，否则跑的还是内存里的老版本。
 
 ## 怎么算跑对了
 
@@ -53,7 +91,14 @@ npm run dev
 3. 删掉这条 → 空闲恢复两段
 4. 日期改成 2026-11-16 → 空闲变成一整天（840 分钟），忙碌列表显示「这一天还没有记录」
 
-想确认数据真的来自后端：**把窗口 A 停掉再刷新页面**，会提示「连不上后端」。
+想确认数据真的来自数据库：
+
+```bash
+psql -U postgres -d scheduler -c "SELECT count(*) FROM events;"
+```
+
+页面上录一条，这个数字会跟着变；重启后端也不会归零（不像内存版，一重启就回到两条）。
+中文在 Windows 终端里可能显示成乱码，那是终端编码问题，不是数据坏了。
 
 ## 接口
 
@@ -73,25 +118,62 @@ npm run dev
 
 ## 数据从哪来
 
-后端算的，不是写死的。
-
 页面请求 `/api/free-slots?date=<选中的日期>` → vite 开发服务器转发到 `localhost:3001`
-→ 后端从 `backend/src/data.js` 取那天的忙碌记录 → `backend/src/freeSlots.js` 算并集、扣缓冲、筛时长
-→ 按契约返回。
+→ 后端在 `backend/src/data.js` 里发 SQL，从 PostgreSQL 取那天的忙碌记录
+→ `backend/src/freeSlots.js` 算并集、扣缓冲、筛时长 → 按契约返回。
 
 几处约定：
 
-- 日期不在页面里写死：`main.js` 每次发请求前现读日期框的值，所以切日期不用刷新页面。
-- 字段形状以 `shared/types.ts` 为准，两边都照它写，它是唯一来源。
+- **连接只有一处**：`backend/src/db.js`，密码从 `backend/.env` 读，代码里没有任何明文密码。
+- **SQL 只有一处**：`backend/src/data.js`。想换表结构只改这里和 `db/schema.sql`。
+- **`freeSlots.js` 不知道数据存在哪**：它收一个数组、返回一个数组，纯函数，所以换存储时它一个字没改。
+- **日期不在页面里写死**：`main.js` 每次发请求前现读日期框的值，所以切日期不用刷新页面。
+- **契约是唯一来源**：字段形状以 `shared/types.ts` 为准，两边都照它写。
 - `shared/mock/` 的两份假响应保留着：后端自测、页面测试都能拿它当样例，不是废文件。
+
+### 换存储时改了什么
+
+从内存数组换成 PostgreSQL，实际改动只有：
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/db.js` | 新增：连接池 + 读 `.env` |
+| `src/data.js` | 重写：数组操作 → SQL，函数全部变 `async` |
+| `src/index.js` | 只加 `async` / `await`，路由、校验、错误码一个字没动 |
+| `src/freeSlots.js` | **零改动** |
+| `frontend/` | **零改动** |
+
+`await` 是唯一挡不住的穿透：内存是同步的，数据库是异步的，调用处必须跟着变成 `async`。这不是分层没分对，是语言层面的必然。
 
 ## 目录
 
 - `shared/` — 接口契约 + Mock 数据，前后端共用同一份，别复制
 - `frontend/` — 页面（vite）。所有接口调用都在 `src/main.js`，没有别的请求散落在别处
-- `backend/` — 接口（express）。`src/index.js` 管网络与校验，`src/data.js` 管存取，`src/freeSlots.js` 管算
+- `backend/` — 接口（express）
+  - `src/index.js` — 路由、校验、错误码（管网络）
+  - `src/data.js` — 存取，写 SQL（管数据）
+  - `src/freeSlots.js` — 算共同空闲（管算法，纯函数）
+  - `src/db.js` — 数据库连接池（管连接）
+  - `db/schema.sql` — 表结构、约束、基线数据
 
-数据现在放在内存里，重启后端就回到初始的两条。以后换数据库只改 `src/data.js`，这是分层是否分对的验收方式：换存储时要改几个文件。
+## 常见问题
+
+**`psql -f db/schema.sql` 报「编码 GBK 中字节序列…」**
+SQL 文件是 UTF-8，而 psql 在中文 Windows 上默认按 GBK 读。执行前先声明：
+
+```powershell
+$env:PGCLIENTENCODING="UTF8"
+psql -U postgres -d scheduler -f db/schema.sql
+```
+
+**后端报 `password authentication failed for user "postgres"`**
+`.env` 里的密码和数据库里的不一致。改库里的密码：`psql -U postgres -d scheduler` 进去后敲 `\password postgres`，输两遍新密码（都不显示）。
+
+**页面提示「连不上后端」**
+窗口 A 没在跑，或者改了后端代码没重启。先看窗口 A 还在不在。
+
+**`psql` 里中文显示成乱码**
+终端编码问题，不是数据坏了：`chcp 65001` 之后再查。
 
 ## 规则速览
 
