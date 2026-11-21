@@ -32,13 +32,98 @@ const events = [
   },
 ]
 
-/** 这一格只有读，没有写。写接口（POST /api/events 等）留到后面 */
+/** 新成员没指定颜色时，从这套调色板里轮着取一个（契约：color 可选，默认值归后端） */
+const COLOR_PALETTE = ['#4f8ef7', '#f2994a', '#27ae60', '#9b51e0', '#eb5757', '#2d9cdb']
+
+// 内存里的自增 id。下一节换 PostgreSQL，这行会交给数据库的自增主键 / UUID
+let userSeq = 0
+
+function nextUserId() {
+  userSeq += 1
+  return `u_${userSeq}`
+}
+
+// 忙碌记录的自增 id。从现有条数起算，避免和种子里的 e1 / e2 撞号
+let eventSeq = events.length
+
+function nextEventId() {
+  eventSeq += 1
+  return `e${eventSeq}`
+}
+
+// ---------- 读 ----------
+
 function listUsers() {
   return users
+}
+
+/**
+ * 按 id 找成员，找不到返回 null。
+ * 录忙碌时要先确认「这个人在不在」，这个判断只有存储层做得出来。
+ */
+function findUser(id) {
+  return users.find((u) => u.id === id) || null
 }
 
 function listEventsByDate(date) {
   return events.filter((e) => e.date === date)
 }
 
-module.exports = { listUsers, listEventsByDate }
+// ---------- 写 ----------
+
+/**
+ * 新增成员。
+ *
+ * 重名检查放在这里、不放在 index.js：只有存储层知道「库里已经有哪些人」。
+ * 重名时不抛异常、只返回 null —— 这一层不认识 HTTP 状态码和 code，
+ * 回什么错误由上层决定。存储只负责「存成了 / 没存成」。
+ */
+function addUser({ name, color }) {
+  if (users.some((u) => u.name === name)) return null
+
+  const user = {
+    id: nextUserId(),
+    name,
+    color: color || COLOR_PALETTE[users.length % COLOR_PALETTE.length],
+  }
+  users.push(user)
+  return user
+}
+
+/**
+ * 新增一条忙碌记录。
+ *
+ * 这里只负责存和查重，不判断「时间格式对不对」——
+ * 格式只有 HTTP 层看得到，存在性由上层问 findUser。
+ *
+ * 查重口径（产品规则，2026-11-21 拍板）：同一人 + 同一天 + 起止完全相同 → 重复。
+ * title 不参与比较：那个时段已经被占住了，换个事由再录一次也是误操作。
+ * 命中时返回 null，由上层决定回 409 DUPLICATE_EVENT —— 存储层不认识 HTTP 码。
+ */
+function addEvent({ userId, date, startTime, endTime, title }) {
+  const duplicated = events.some(
+    (e) =>
+      e.userId === userId && e.date === date && e.startTime === startTime && e.endTime === endTime,
+  )
+  if (duplicated) return null
+
+  const event = {
+    id: nextEventId(),
+    userId,
+    date,
+    startTime,
+    endTime,
+    title,
+  }
+  events.push(event)
+  return event
+}
+
+/** 删一条忙碌记录。删不到返回 null，回什么错误由上层决定（跟 addUser 一个套路） */
+function removeEvent(id) {
+  const index = events.findIndex((e) => e.id === id)
+  if (index === -1) return null
+  return events.splice(index, 1)[0]
+}
+
+module.exports = { listUsers, listEventsByDate, addUser, findUser, addEvent, removeEvent }

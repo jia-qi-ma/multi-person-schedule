@@ -1,8 +1,11 @@
 /**
  * 多人时间表 · 前后端共用契约（第 1 格定稿）
  *
- * 契约版本：v1.1 · 2026-11-15
- *   v1.0 是上一轮的草稿，v1.1 是评审后的定稿。
+ * 契约版本：v1.2 · 2026-11-21
+ *   v1.0 是草稿，v1.1 是评审后的定稿。
+ *   v1.2（第 4 格实现期）：补上 POST /api/events 漏写的错误码，
+ *     并新增 DUPLICATE_EVENT（同一人、同一天、起止完全相同 → 409）。
+ *     只加不改：老客户端遇到不认识的 code 就显示 error 文案兜底，属于安全扩展，升次版本。
  *   升版本规则：新增「可选字段」是安全扩展（旧客户端读不到就当没有），升次版本；
  *   改掉 / 删掉已有字段、改字段含义、改错误优先级，属于破坏性变更，
  *   升主版本并通知所有调用方（第 5 格加登录就是这种）。
@@ -58,6 +61,7 @@ export type ErrorCode =
   | 'NAME_EMPTY'
   | 'NAME_DUPLICATE'
   | 'USER_NOT_FOUND'
+  | 'DUPLICATE_EVENT'
   | 'NOT_FOUND'
   | 'INTERNAL_ERROR'
 
@@ -218,7 +222,7 @@ export interface FreeSlotResult {
  * | POST   | /api/users            | CreateUserInput (JSON body)   | User             | 400 NAME_EMPTY / 409 NAME_DUPLICATE |
  * | DELETE | /api/users/:id        | 路径参数 id                   | { id: string }   | 404 NOT_FOUND            |
  * | GET    | /api/events?date=     | 查询串 date=YYYY-MM-DD        | EventWithUser[]  | 400 INVALID_DATE / 500 INTERNAL_ERROR |
- * | POST   | /api/events           | CreateEventInput (JSON body)  | Event            | 400 INVALID_TIME / 404 USER_NOT_FOUND |
+ * | POST   | /api/events           | CreateEventInput (JSON body)  | Event            | 404 USER_NOT_FOUND / 400 INVALID_DATE / 400 INVALID_TIME / 400 INVALID_PARAMETER / 409 DUPLICATE_EVENT |
  * | DELETE | /api/events/:id       | 路径参数 id                   | { id: string }   | 404 NOT_FOUND            |
  * | GET    | /api/free-slots       | FreeSlotQuery (查询串)        | FreeSlotResult   | 400 INVALID_PARAMETER    |
  *

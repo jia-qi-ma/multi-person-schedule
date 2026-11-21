@@ -3,11 +3,65 @@
   <head>
     <meta charset="UTF-8" />
     <title>多人时间表 · 共同空闲</title>
+    <style>
+      body {
+        font-family: system-ui, "Microsoft YaHei", sans-serif;
+        margin: 2rem;
+        max-width: 40rem;
+      }
+      h1 { font-size: 1.4rem; }
+      h2 { font-size: 1.1rem; margin-top: 2rem; }
+      ul { padding-left: 1.2rem; }
+      li { margin: 0.25rem 0; }
+      /* 成员那行的颜色圆点：契约里 color 字段就是给这里用的 */
+      .dot {
+        display: inline-block;
+        width: 0.7em;
+        height: 0.7em;
+        border-radius: 50%;
+        margin-right: 0.5em;
+      }
+      form {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        align-items: center;
+        margin: 0.5rem 0;
+      }
+      #event-title { min-width: 9rem; }
+      .hint { font-size: 0.9rem; }
+      .hint.error { color: #c0392b; }
+      .hint.ok { color: #27ae60; }
+      button[disabled] { opacity: 0.5; }
+      .del { margin-left: 0.5rem; font-size: 0.8rem; }
+    </style>
   </head>
   <body>
     <h1>共同空闲时段</h1>
     <p id="meta"></p>
     <ul id="slots"></ul>
+
+    <h2>成员</h2>
+    <ul id="users"></ul>
+
+    <form id="user-form">
+      <input id="user-name" placeholder="成员姓名" autocomplete="off" />
+      <button type="submit">添加成员</button>
+      <span id="user-feedback" class="hint"></span>
+    </form>
+
+    <h2>忙碌时段 · <span id="event-date"></span></h2>
+    <ul id="events"></ul>
+
+    <form id="event-form">
+      <select id="event-user"></select>
+      <input id="event-start" type="time" value="09:00" />
+      <input id="event-end" type="time" value="10:00" />
+      <input id="event-title" placeholder="事由，如 组会" autocomplete="off" />
+      <button type="submit">录入忙碌</button>
+      <span id="event-feedback" class="hint"></span>
+    </form>
+
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

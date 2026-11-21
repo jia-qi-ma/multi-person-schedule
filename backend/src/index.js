@@ -9,7 +9,7 @@
  */
 
 const express = require('express')
-const { listUsers, listEventsByDate } = require('./data')
+const { listUsers, listEventsByDate, addUser, findUser, addEvent, removeEvent } = require('./data')
 const { computeFreeSlots } = require('./freeSlots')
 
 const app = express()
@@ -86,6 +86,104 @@ app.get('/api/free-slots', (req, res) => {
       })),
     },
   })
+})
+
+// ---------- 成员 ----------
+
+// GET /api/users：录入前的下拉框要用它拿成员列表
+app.get('/api/users', (req, res) => {
+  res.json({ success: true, data: listUsers() })
+})
+
+// POST /api/users：body 是 CreateUserInput（JSON）
+// 契约里的两个错误：400 NAME_EMPTY / 409 NAME_DUPLICATE
+app.post('/api/users', (req, res) => {
+  const body = req.body || {}
+
+  // ① 格式校验归 HTTP 层：body 里有没有一个像样的 name
+  const name = typeof body.name === 'string' ? body.name.trim() : ''
+  if (!name) {
+    return fail(res, 400, 'NAME_EMPTY', 'name 不能为空')
+  }
+
+  // ② color 可选：给了就用（必须是非空字符串），没给由存储层分配默认调色板
+  const color =
+    typeof body.color === 'string' && body.color.trim() ? body.color.trim() : undefined
+
+  // ③ 唯一性校验归存储层：只有它知道库里已经有哪些成员
+  const user = addUser({ name, color })
+  if (!user) {
+    return fail(res, 409, 'NAME_DUPLICATE', `成员「${name}」已存在`)
+  }
+
+  // 201 = 新建成功。body 仍是统一信封，前端只判 success 就够
+  res.status(201).json({ success: true, data: user })
+})
+
+// ---------- 忙碌时段 ----------
+
+// GET /api/events?date=：列出某人某天的忙碌，页面列出来才能删
+// 返回 EventWithUser（带 user），前端不用为了显示名字再发一次请求
+app.get('/api/events', (req, res) => {
+  const { date } = req.query
+
+  if (typeof date !== 'string' || !DATE_RE.test(date)) {
+    return fail(res, 400, 'INVALID_DATE', 'date 必须是 YYYY-MM-DD 格式')
+  }
+
+  const list = listEventsByDate(date).map((e) => ({
+    ...e,
+    user: findUser(e.userId),
+  }))
+
+  res.json({ success: true, data: list })
+})
+
+// POST /api/events：body 是 CreateEventInput（JSON）
+// 错误按契约的优先级来：① 人存不存在 → ② 参数格式
+app.post('/api/events', (req, res) => {
+  const body = req.body || {}
+
+  // ① 存在性优先。契约第 236 行：同样的输入永远回同一个 code
+  const userId = typeof body.userId === 'string' ? body.userId.trim() : ''
+  if (!findUser(userId)) {
+    return fail(res, 404, 'USER_NOT_FOUND', `userId「${userId}」对应的成员不存在`)
+  }
+
+  // ② 再校验格式
+  const date = typeof body.date === 'string' ? body.date : ''
+  if (!DATE_RE.test(date)) {
+    return fail(res, 400, 'INVALID_DATE', 'date 必须是 YYYY-MM-DD 格式')
+  }
+
+  const startTime = typeof body.startTime === 'string' ? body.startTime : ''
+  const endTime = typeof body.endTime === 'string' ? body.endTime : ''
+  if (!TIME_RE.test(startTime) || !TIME_RE.test(endTime)) {
+    return fail(res, 400, 'INVALID_TIME', 'startTime / endTime 必须是 HH:mm 格式')
+  }
+  if (startTime >= endTime) {
+    return fail(res, 400, 'INVALID_TIME', 'startTime 必须早于 endTime')
+  }
+
+  const title = typeof body.title === 'string' ? body.title.trim() : ''
+  if (!title) {
+    return fail(res, 400, 'INVALID_PARAMETER', 'title 不能为空')
+  }
+
+  const event = addEvent({ userId, date, startTime, endTime, title })
+  if (!event) {
+    return fail(res, 409, 'DUPLICATE_EVENT', '这一段忙碌已经录过了（同一天、起止完全相同）')
+  }
+  res.status(201).json({ success: true, data: event })
+})
+
+// DELETE /api/events/:id：删一条忙碌
+app.delete('/api/events/:id', (req, res) => {
+  const removed = removeEvent(req.params.id)
+  if (!removed) {
+    return fail(res, 404, 'NOT_FOUND', `忙碌记录「${req.params.id}」不存在`)
+  }
+  res.json({ success: true, data: { id: removed.id } })
 })
 
 // 兜底：路径写错时也回统一形状，不是一个 HTML 报错页
