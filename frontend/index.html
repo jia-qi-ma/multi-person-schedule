@@ -4,46 +4,330 @@
     <meta charset="UTF-8" />
     <title>多人时间表 · 共同空闲</title>
     <style>
+      /* ============================================================
+         配色只有三样：橙、白、黑。
+         橙色只用来表示「可用」—— 这是整个产品要输出的答案，
+         所以画面里最显眼的颜色就该是它。忙碌是解释性的信息，用灰。
+         ============================================================ */
+      :root {
+        --orange: #e8590c;
+        --orange-soft: #fff1e6;
+        --orange-ink: #8a3a0c;
+        --ink: #1a1a1a;
+        --ink-2: #6b6b6b;
+        --ink-3: #9a9a9a;
+        --line: #e5e5e5;
+        --line-soft: #f0f0f0;
+        --busy: #f0f0f0;
+      }
+
+      * { box-sizing: border-box; }
+
       body {
         font-family: system-ui, "Microsoft YaHei", sans-serif;
-        margin: 2rem;
-        max-width: 40rem;
+        margin: 0 auto;
+        padding: 2.4rem 1.4rem 4rem;
+        max-width: 42rem;
+        color: var(--ink);
+        background: #fff;
+        font-size: 0.92rem;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
       }
-      h1 { font-size: 1.4rem; }
-      h2 { font-size: 1.1rem; margin-top: 2rem; }
-      ul { padding-left: 1.2rem; }
-      li { margin: 0.25rem 0; }
-      /* 成员那行的颜色圆点：契约里 color 字段就是给这里用的 */
-      .dot {
-        display: inline-block;
-        width: 0.7em;
-        height: 0.7em;
-        border-radius: 50%;
-        margin-right: 0.5em;
+
+      /* 标题和分隔线撑起层次：没有层次时满屏文字差不多黑，眼睛不知道先看哪 */
+      h1 {
+        font-size: 1.45rem;
+        font-weight: 650;
+        letter-spacing: -0.01em;
+        margin: 0;
       }
+
+      h2 {
+        font-size: 0.92rem;
+        font-weight: 600;
+        margin: 2.4rem 0 0.2rem;
+        padding-bottom: 0.45rem;
+        border-bottom: 1px solid var(--line);
+      }
+
+      /* ---------- 控件：全部统一成同一套尺寸和边框 ---------- */
+      input,
+      button {
+        font: inherit;
+        font-size: 0.88rem;
+        padding: 0.42rem 0.6rem;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fff;
+        color: var(--ink);
+      }
+
+      input::placeholder { color: var(--ink-3); }
+
+      input:focus,
+      button:focus-visible {
+        outline: 2px solid rgba(232, 89, 12, 0.22);
+        outline-offset: 1px;
+        border-color: var(--orange);
+      }
+
+      /* 主按钮用黑底：一页里只有「最主要的那个动作」是黑的 */
+      button[type="submit"] {
+        background: var(--ink);
+        border-color: var(--ink);
+        color: #fff;
+        cursor: pointer;
+        font-weight: 500;
+      }
+      button[type="submit"]:hover { background: #333; }
+      button:disabled { opacity: 0.45; cursor: not-allowed; }
+
       form {
         display: flex;
         flex-wrap: wrap;
-        gap: 0.4rem;
+        gap: 0.5rem;
         align-items: center;
-        margin: 0.5rem 0;
       }
-      #event-title { min-width: 9rem; }
-      .hint { font-size: 0.9rem; }
-      .hint.error { color: #c0392b; }
-      .hint.ok { color: #27ae60; }
-      button[disabled] { opacity: 0.5; }
-      .del { margin-left: 0.5rem; font-size: 0.8rem; }
-      /* 顶栏：谁登录着 + 登出。放在最上面，因为它是整页的前提 */
+
+      .hint { font-size: 0.82rem; color: var(--ink-2); }
+      .hint.error { color: #b93a2b; }
+      .hint.ok { color: #2f7a43; }
+
+      #boot {
+        color: var(--ink-2);
+        font-size: 0.85rem;
+        text-align: center;
+        margin-top: 3rem;
+      }
+
+      /* ---------- 登录页：收窄、居中，两个表单上下排 ---------- */
+      #login-view {
+        max-width: 21rem;
+        margin: 3rem auto 0;
+      }
+      #login-view h1 { text-align: center; }
+      #login-view h2 {
+        text-align: center;
+        border-bottom: 0;
+        margin-top: 2.2rem;
+        color: var(--ink-2);
+        font-size: 0.85rem;
+        font-weight: 500;
+      }
+      #login-view form {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.5rem;
+      }
+      #login-view input,
+      #login-view button { width: 100%; }
+      #login-view .hint { text-align: center; }
+      #login-view > .hint {
+        margin-top: 1.6rem;
+        font-size: 0.76rem;
+        color: var(--ink-3);
+      }
+
+      /* ---------- 顶栏 ---------- */
       #whoami {
         display: flex;
         gap: 0.6rem;
         align-items: center;
-        font-size: 0.9rem;
-        padding-bottom: 0.6rem;
-        border-bottom: 1px solid #ddd;
+        font-size: 0.8rem;
+        color: var(--ink-2);
+        padding-bottom: 0.7rem;
+        border-bottom: 1px solid var(--line);
+        margin: 0 0 1.5rem;
       }
-      #logout { margin-left: auto; }
+      #whoami strong { color: var(--ink); font-weight: 600; }
+      #whoami .hint { font-size: 0.78rem; }
+
+      #logout {
+        margin-left: auto;
+        background: #fff;
+        border-color: var(--line);
+        color: var(--ink-2);
+        font-size: 0.78rem;
+        padding: 0.26rem 0.7rem;
+        cursor: pointer;
+      }
+      #logout:hover { color: var(--orange); border-color: var(--orange); }
+
+      /* ---------- 日期行 ---------- */
+      .date-row {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin: 0.7rem 0 0;
+        font-size: 0.85rem;
+        color: var(--ink-2);
+      }
+
+      #meta {
+        margin: 0.85rem 0 0;
+        font-size: 0.8rem;
+        color: var(--ink-2);
+        font-variant-numeric: tabular-nums;
+      }
+      #meta.error { color: #b93a2b; }
+
+      /* ---------- 图例：不解释的话，读者不知道白色那段是什么 ---------- */
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.9rem;
+        align-items: center;
+        margin: 0.55rem 0 0.9rem;
+        font-size: 0.76rem;
+        color: var(--ink-2);
+      }
+      .key {
+        display: inline-block;
+        width: 0.7rem;
+        height: 0.7rem;
+        border-radius: 3px;
+        margin-right: 0.32rem;
+        vertical-align: -1px;
+      }
+      .key.free { background: var(--orange-soft); border-left: 2px solid var(--orange); }
+      .key.busy { background: var(--busy); border-left: 2px solid #d5d5d5; }
+      .key.buffer { background: #fff; border: 1px dashed #ccc; }
+
+      /* ============================================================
+         时间轴：一整天从 08:00 排到 22:00，按分钟等比定高。
+         有了高度对比，才看得出「哪段长、哪段短」——
+         原来那串文字（08:00 – 08:45 · 45 分钟）是看不出分布的。
+         ============================================================ */
+      .timeline {
+        position: relative;
+        height: 616px; /* 14 小时 × 44px */
+        margin: 0 0 0 3rem;
+        border-left: 1px solid var(--line);
+        /* 每小时一条极浅的横线，靠 CSS 重复渐变画，不用 14 个元素 */
+        background-image: repeating-linear-gradient(
+          to bottom,
+          var(--line-soft) 0,
+          var(--line-soft) 1px,
+          transparent 1px,
+          transparent 44px
+        );
+      }
+
+      .tick {
+        position: absolute;
+        left: -3rem;
+        width: 2.5rem;
+        text-align: right;
+        font-size: 0.72rem;
+        color: var(--ink-3);
+        font-variant-numeric: tabular-nums;
+        transform: translateY(-50%);
+      }
+
+      .block {
+        position: absolute;
+        left: 0.6rem;
+        right: 0;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        padding: 0.15rem 0.55rem 0.15rem 0.45rem;
+        border-radius: 5px;
+        overflow: hidden;
+        font-size: 0.78rem;
+        line-height: 1.28;
+      }
+
+      .block .label {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .block .sub {
+        font-size: 0.72rem;
+        opacity: 0.72;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .block.free {
+        background: var(--orange-soft);
+        border-left: 3px solid var(--orange);
+        color: var(--orange-ink);
+      }
+      .block.free .label { font-weight: 600; }
+
+      .block.busy {
+        background: var(--busy);
+        border-left: 3px solid #d5d5d5;
+        color: var(--ink-2);
+      }
+
+      /* ---------- 列表 ---------- */
+      ul {
+        list-style: none;
+        padding: 0;
+        margin: 0.3rem 0 0;
+      }
+
+      li {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.45rem 0.1rem;
+        border-bottom: 1px solid var(--line-soft);
+        font-size: 0.87rem;
+      }
+      li:last-child { border-bottom: 0; }
+
+      .dot {
+        width: 0.55rem;
+        height: 0.55rem;
+        border-radius: 50%;
+        flex: 0 0 auto;
+      }
+
+      .time {
+        color: var(--ink-2);
+        font-variant-numeric: tabular-nums;
+        flex: 0 0 auto;
+      }
+
+      .del {
+        margin-left: auto;
+        flex: 0 0 auto;
+        background: #fff;
+        border-color: var(--line);
+        color: var(--ink-2);
+        font-size: 0.75rem;
+        padding: 0.16rem 0.55rem;
+        border-radius: 5px;
+        cursor: pointer;
+      }
+      .del:hover {
+        color: var(--orange);
+        border-color: var(--orange);
+        background: var(--orange-soft);
+      }
+
+      .empty {
+        color: var(--ink-2);
+        font-size: 0.85rem;
+        padding: 0.55rem 0.1rem;
+      }
+
+      /* 录入区做成一块浅底，和上面的列表分开：它是一次性动作，不是常驻内容 */
+      #event-form {
+        margin-top: 0.9rem;
+        padding: 0.85rem;
+        background: #fafafa;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+      #event-form .hint { flex: 0 0 100%; }
+      #event-title { flex: 1 1 8rem; }
     </style>
   </head>
   <body>
@@ -52,7 +336,7 @@
     <p id="boot">正在检查登录状态…</p>
 
     <!-- 未登录：只能登录或注册，别的什么都不给看。
-         注册放在这里而不是主界面里，是因为「成员」只能由本人注册产生 —— 
+         注册放在这里而不是主界面里，是因为「成员」只能由本人注册产生 ——
          登录后谁都没有「替别人开户」的能力。 -->
     <section id="login-view" hidden>
       <h1>登录</h1>
@@ -93,13 +377,22 @@
       </p>
 
       <h1>共同空闲时段</h1>
-      <!-- 日期放顶部：它管整页，一改上面空闲段和下面忙碌列表都得跟着换 -->
-      <p>
+      <!-- 日期放顶部：它管整页，一改上面时间轴和下面忙碌列表都得跟着换 -->
+      <p class="date-row">
         <label for="date-picker">日期</label>
         <input id="date-picker" type="date" value="2026-11-15" />
       </p>
+
       <p id="meta"></p>
-      <ul id="slots"></ul>
+
+      <div class="legend">
+        <span><span class="key free"></span>可用</span>
+        <span><span class="key busy"></span>忙碌</span>
+        <span><span class="key buffer"></span>缓冲（忙碌前后各留一段）</span>
+      </div>
+
+      <!-- 时间轴由 main.js 填充：刻度 + 按分钟定高的色块 -->
+      <div id="timeline" class="timeline"></div>
 
       <h2>成员</h2>
       <ul id="users"></ul>

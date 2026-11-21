@@ -16,6 +16,23 @@
 let currentUser = null
 
 /**
+ * 时间轴的坐标换算。
+ *
+ * 08:00–22:00 是契约里的可安排范围，轴上只画这一段 ——
+ * 范围外的时间本来就不参与计算，画出来只会误导。
+ * 每小时 44px（14 小时 = 616px），和 index.html 里 .timeline 的高度对应。
+ */
+const DAY_START = 8 * 60 // 08:00，折算成「从 0 点起第几分钟」
+const DAY_END = 22 * 60
+const PX_PER_MIN = 44 / 60
+
+/**
+ * 两个接口的数据都到齐才能画轴：空闲段来自 /api/free-slots，
+ * 忙碌段来自 /api/events。所以先存下来，等 refresh() 收尾时统一渲染。
+ */
+const state = { slots: [], events: [] }
+
+/**
  * 日期不在模块加载时算死，而是每次发请求前现读输入框。
  * 如果写成 const DATE = ...，页面一打开就定格了 —— 用户之后改日期，
  * 请求还落在旧的那天，最难查的是它不报错。
@@ -50,7 +67,7 @@ const els = {
 
   datePicker: document.querySelector('#date-picker'),
   meta: document.querySelector('#meta'),
-  slots: document.querySelector('#slots'),
+  timeline: document.querySelector('#timeline'),
   users: document.querySelector('#users'),
   events: document.querySelector('#events'),
   eventDate: document.querySelector('#event-date'),
@@ -114,7 +131,7 @@ function showLogin(message = '') {
 
   // 顺手清掉上一个人的数据。读接口是公开的，不清的话
   // 下一个人登录前的那一瞬间，屏幕上还留着别人的忙碌时段
-  els.slots.innerHTML = ''
+  els.timeline.innerHTML = ''
   els.meta.textContent = ''
   els.users.innerHTML = ''
   els.events.innerHTML = ''
@@ -190,33 +207,49 @@ async function removeSelf(name) {
   els.loginForm.reset()
 }
 
+/**
+ * 拉空闲段。
+ *
+ * 它现在不再直接往页面上写列表 —— 只把数据存进 state，
+ * 等 refresh() 收尾时由 renderTimeline() 一次画完。
+ * 原因是时间轴要同时用空闲段和忙碌段，谁先回来都不能单独画。
+ */
 async function loadSlots() {
   const body = await api(slotsUrl())
-  els.slots.innerHTML = ''
+  state.slots = []
+
   if (!body.success) {
-    els.slots.textContent = body.error
+    els.meta.textContent = body.error
+    els.meta.className = 'error'
     return
   }
+
   const { date, userCount, minMinutes, bufferMinutes, slots } = body.data
+  els.meta.className = ''
   els.meta.textContent = `${date} · ${userCount} 人 · 最短 ${minMinutes} 分钟 · 缓冲 ${bufferMinutes} 分钟`
-  slots.forEach((slot) => {
-    const item = document.createElement('li')
-    item.textContent = `${slot.start.slice(11)} – ${slot.end.slice(11)}（${slot.durationMinutes} 分钟）`
-    els.slots.appendChild(item)
-  })
+  state.slots = slots
 }
 
 async function loadEvents() {
   const body = await api(eventsUrl())
+  state.events = []
   els.events.innerHTML = ''
+  els.events.className = ''
+
   if (!body.success) {
     els.events.textContent = body.error
+    els.events.className = 'empty'
     return
   }
+
+  state.events = body.data
+
   if (body.data.length === 0) {
     els.events.textContent = '这一天还没有记录'
+    els.events.className = 'empty'
     return
   }
+
   body.data.forEach((ev) => {
     const item = document.createElement('li')
 
@@ -225,10 +258,16 @@ async function loadEvents() {
     dot.className = 'dot'
     dot.style.background = ev.user ? ev.user.color : '#999'
 
-    const label = document.createElement('span')
-    label.textContent = `${ev.startTime} – ${ev.endTime}　${ev.user ? ev.user.name : '（已删除的成员）'} · ${ev.title}`
+    // 时间和内容分成两个 span：时间用等宽数字、颜色浅一点，
+    // 拼成一整串字符串就没法分别控制样式了
+    const time = document.createElement('span')
+    time.className = 'time'
+    time.textContent = `${ev.startTime} – ${ev.endTime}`
 
-    item.append(dot, label)
+    const label = document.createElement('span')
+    label.textContent = `${ev.user ? ev.user.name : '（已删除的成员）'} · ${ev.title}`
+
+    item.append(dot, time, label)
 
     // 只给自己的记录画删除按钮。这只是为了界面干净：
     // 真去删别人的，后端会回 403。前端的判断永远只是「建议」，不是权限
@@ -242,6 +281,139 @@ async function loadEvents() {
 
     els.events.appendChild(item)
   })
+}
+
+// ---------- 时间轴渲染 ----------
+
+/** "09:30" → 570（从 0 点起的分钟数） */
+function toMinutes(hhmm) {
+  const [h, m] = hhmm.split(':').map(Number)
+  return h * 60 + m
+}
+
+/** 570 → "09:30" */
+function toHHMM(minutes) {
+  const h = Math.floor(minutes / 60)
+  const m = minutes % 60
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
+}
+
+/**
+ * 把重叠的忙碌段合成一块 —— 只为「画图」。
+ *
+ * 注意这**不是**在重算空闲。哪段可用、哪段不可用，唯一的事实来源是
+ * 后端 /api/free-slots；这里只是把几条重叠的灰色块并成一块，
+ * 否则同一时间三个人忙，轴上就会画出三块互相盖住的方块。
+ * 前端可以为展示做整理，但不能自己判断业务事实。
+ */
+function mergeBusyForDisplay(events) {
+  const items = events
+    .map((ev) => ({
+      // 裁到轴的范围里：有人录了 06:00 或 23:00，块不能画到轴外面去
+      start: Math.max(toMinutes(ev.startTime), DAY_START),
+      end: Math.min(toMinutes(ev.endTime), DAY_END),
+      name: ev.user ? ev.user.name : '已删除的成员',
+      title: ev.title,
+    }))
+    .filter((it) => it.end > it.start) // 整段都在范围外的，轴上不画
+    .sort((a, b) => a.start - b.start)
+
+  const merged = []
+  for (const it of items) {
+    const last = merged[merged.length - 1]
+    if (last && it.start <= last.end) {
+      last.end = Math.max(last.end, it.end) // 和上一块重叠或首尾相接，并进去
+      last.names.add(it.name)
+      last.titles.add(it.title)
+    } else {
+      merged.push({
+        start: it.start,
+        end: it.end,
+        names: new Set([it.name]),
+        titles: new Set([it.title]),
+      })
+    }
+  }
+  return merged
+}
+
+/** 画一个块。位置和高度都按「分钟差 × 每分钟像素」算 */
+function appendBlock({ start, end, kind, label, sub, tooltip }) {
+  const top = (start - DAY_START) * PX_PER_MIN
+  const height = (end - start) * PX_PER_MIN
+
+  const block = document.createElement('div')
+  block.className = `block ${kind}`
+  block.style.top = `${top}px`
+  // 减 1px：相邻的块之间留一道缝，看起来才是两块，不是连成一整条
+  block.style.height = `${Math.max(height - 1, 2)}px`
+  // 块里放不下的信息全靠它：多人重叠时 label 只能写「N 人忙碌」，
+  // 具体是谁、干什么，悬停才看得到
+  block.title = tooltip || (sub ? `${label}（${sub}）` : label)
+
+  // 太矮的块塞不下字，只留颜色；细节靠悬停时的 title
+  if (height >= 26) {
+    const main = document.createElement('span')
+    main.className = 'label'
+    main.textContent = label
+    block.appendChild(main)
+
+    if (height >= 42 && sub) {
+      const subEl = document.createElement('span')
+      subEl.className = 'sub'
+      subEl.textContent = sub
+      block.appendChild(subEl)
+    }
+  }
+
+  els.timeline.appendChild(block)
+}
+
+/**
+ * 画整条时间轴：刻度 → 忙碌块 → 空闲块。
+ *
+ * 两者在时间上不会重叠（空闲本来就是忙碌的补集），所以谁先画都不影响结果；
+ * 保持「背景信息在前、结论在后」这个顺序，以后要往上叠别的东西时不会打架。
+ */
+function renderTimeline() {
+  els.timeline.innerHTML = ''
+
+  // 刻度每 2 小时一个：14 个标签太密，读起来更累
+  for (let m = DAY_START; m <= DAY_END; m += 120) {
+    const tick = document.createElement('div')
+    tick.className = 'tick'
+    tick.style.top = `${(m - DAY_START) * PX_PER_MIN}px`
+    tick.textContent = toHHMM(m)
+    els.timeline.appendChild(tick)
+  }
+
+  for (const busy of mergeBusyForDisplay(state.events)) {
+    const names = [...busy.names]
+    const titles = [...busy.titles]
+    appendBlock({
+      start: busy.start,
+      end: busy.end,
+      kind: 'busy',
+      // 一个人的时候说清是谁、干什么；几个人重叠时列全反而挤不下
+      label: names.length === 1 ? `${names[0]} · ${titles.join(' / ')}` : `${names.length} 人忙碌`,
+      sub: `${toHHMM(busy.start)} – ${toHHMM(busy.end)}`,
+      // 悬停时把名字和事由都列出来，弥补块里放不下的部分
+      tooltip: `${names.join('、')}｜${titles.join(' / ')}｜${toHHMM(busy.start)} – ${toHHMM(busy.end)}`,
+    })
+  }
+
+  for (const slot of state.slots) {
+    // slot.start 形如 "2026-11-15T08:00"，只取时间部分
+    const start = toMinutes(slot.start.slice(11))
+    const end = toMinutes(slot.end.slice(11))
+    appendBlock({
+      start,
+      end,
+      kind: 'free',
+      label: `${toHHMM(start)} – ${toHHMM(end)}`,
+      sub: `${slot.durationMinutes} 分钟`,
+    })
+  }
 }
 
 async function removeEvent(id) {
@@ -259,7 +431,9 @@ async function removeEvent(id) {
 function refresh() {
   // 标题上的日期和这一轮请求用的是同一天，不会出现「显示 15 号、查的是 16 号」
   els.eventDate.textContent = currentDate()
-  return Promise.all([loadUsers(), loadSlots(), loadEvents()])
+
+  // 三个请求都回来之后再画轴：空闲段和忙碌段缺一个，画出来的都是错图
+  return Promise.all([loadUsers(), loadSlots(), loadEvents()]).then(renderTimeline)
 }
 
 // ---------- 登录 / 登出 ----------
