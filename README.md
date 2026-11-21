@@ -246,6 +246,183 @@ v2.0 是破坏性变更，改了接口签名，所以前端必须同步改、同
 
 这也回答了「测试要写多少」：这个项目别的地方都有外部依赖，唯独算法层一个文件就能验完，所以测试只写这一个文件，把力气花在刀刃上。`index.js` 那堆校验、`auth.js` 那套会话，真要测就得上 HTTP 和数据库，性价比完全不同 —— 那是集成测试的活，不是现在这个阶段该干的。
 
+## 部署到服务器
+
+前面几节讲的都是**开发**形态：vite 边改边刷新，两个终端各跑一半。服务器上是另一套东西。
+
+| | 本机开发 | 服务器 |
+| --- | --- | --- |
+| 前端 | `vite` 开发服务器（5173） | `npm run build` 出 `dist/`，nginx 直接发 |
+| `/api` 转发 | `vite.config.mjs` 里的 `proxy` | `/etc/nginx/sites-enabled/scheduler` 里的 `proxy_pass` |
+| 后端进程 | 窗口 A 里 `npm run dev`，关了就停 | systemd 管，崩了自动拉起、开机自启 |
+
+**为什么必须换**：`vite` 是开发工具，它那个 `proxy` 只在开发时生效。`npm run build` 出来的 `dist/` 里只有两个文件（`index.html` 和一个带内容哈希的 js），没有任何东西会转发 `/api`。这件事必须由部署环境补上，否则浏览器请求 `/api/free-slots` 会打到静态目录上，404。
+
+为什么不让浏览器直接请求 `3001` 端口：那就是跨域。跨域带 cookie 要求 `SameSite=None; Secure`，而 `Secure` 又要求 https，绕成死结。**同源是让 cookie 免费工作的前提。**
+
+### 前置
+
+Ubuntu 22.04 / 24.04，**1 核 1G 够用**（本文按 1G 写，2G 更省心）。需要 SSH 登录、有公网 IP、云平台防火墙放行 80。
+
+### 1. 装运行环境
+
+```bash
+apt update
+apt install -y postgresql postgresql-contrib nginx git curl
+
+# Node 22：Ubuntu 自带的是 18，太老，跟本机对不上
+curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/node.sh
+bash /tmp/node.sh
+apt install -y nodejs
+```
+
+### 2. 1G 内存必须做的两件事
+
+**加 swap。** 不加的话 `npm install` 和 PostgreSQL 会被系统直接杀掉，报错只有一句 `Killed`：
+
+```bash
+fallocate -l 2G /swapfile
+chmod 600 /swapfile
+mkswap /swapfile
+swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+```
+
+最后一行别漏 —— 漏了现在能用，一重启 swap 就没了，而且没有任何报错。
+
+**调 PostgreSQL 参数。** 默认配置是按 4G 内存的机器设计的：
+
+```bash
+sudo -u postgres psql -c "ALTER SYSTEM SET shared_buffers = '64MB';"
+sudo -u postgres psql -c "ALTER SYSTEM SET max_connections = '20';"
+sudo -u postgres psql -c "ALTER SYSTEM SET maintenance_work_mem = '48MB';"
+sudo -u postgres psql -c "ALTER SYSTEM SET effective_cache_size = '256MB';"
+systemctl restart postgresql
+```
+
+### 3. 建库、拉代码、导入表结构
+
+```bash
+sudo -u postgres psql -c "ALTER USER postgres PASSWORD '你的密码';"
+sudo -u postgres psql -c "CREATE DATABASE scheduler;"
+
+cd /opt
+git clone https://github.com/jia-qi-ma/multi-person-schedule.git
+cd multi-person-schedule/backend
+sudo -u postgres psql -d scheduler -f db/schema.sql
+```
+
+密码**只用字母和数字**：它后面要拼进连接串，出现 `@ : / # %` 会让连接串解析错位。
+
+Linux 上不需要 `PGCLIENTENCODING` —— 那个坑是中文 Windows 版 psql 按 GBK 解码 `.sql` 造成的，Ubuntu 本来就是 UTF-8。
+
+### 4. 配 .env
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+把 `DATABASE_URL` 里的占位密码换成真的，并**打开最后一行的 `HOST`**：
+
+```
+DATABASE_URL=postgresql://postgres:你的密码@localhost:5432/scheduler
+HOST=127.0.0.1
+```
+
+`HOST=127.0.0.1` 让后端只监听本机，外面的请求必须经过 nginx。**本机开发不要加这一行**，否则手机连同一个 WiFi 就打不开页面了。
+
+### 5. 装依赖、构建前端
+
+```bash
+cd /opt/multi-person-schedule/backend && npm install
+cd ../frontend && npm install && npm run build
+```
+
+国内服务器先换 npm 源，不然装依赖很慢（写进 `~/.npmrc`，全局生效）：
+
+```bash
+npm config set registry https://registry.npmmirror.com
+```
+
+`dist/` 不进仓库（`.gitignore` 里有），必须在服务器上现构建。构建产物里的文件名带内容哈希，和源码版本一一对应；从别的机器传上去反而会漂。
+
+### 6. 后端常驻
+
+仓库里的 `deploy/scheduler.service` 就是这份配置，服务器上软链过去：
+
+```bash
+ln -s /opt/multi-person-schedule/deploy/scheduler.service /etc/systemd/system/scheduler.service
+systemctl daemon-reload
+systemctl enable --now scheduler
+systemctl status scheduler --no-pager
+```
+
+看到 `active (running)` 和 `loaded (...; enabled; ...)` 两个词就成了。四个关键项，改动时别动错：
+
+| 项 | 为什么必须这样 |
+| --- | --- |
+| `WorkingDirectory` | dotenv 从**当前工作目录**读 `.env`，不是从代码文件旁边。写错能起来但连不上库 |
+| `EnvironmentFile` | 少了它 `DATABASE_URL` 进不了进程，启动立刻失败 |
+| `Restart=always` | 崩了 3 秒后自动拉起，这才是「常驻」 |
+| `After=postgresql.service` | 等数据库先起来，否则开机时连不上会循环重启 |
+
+### 7. nginx
+
+仓库里的 `deploy/nginx.conf`：
+
+```bash
+ln -s /opt/multi-person-schedule/deploy/nginx.conf /etc/nginx/sites-enabled/scheduler
+rm -f /etc/nginx/sites-enabled/default
+nginx -t && systemctl reload nginx
+```
+
+- `rm ... default` 不能省：Ubuntu 自带的默认站点占着 80 端口当 `default_server`，不删它，新配的这个永远轮不上
+- `nginx -t` 也不能省：配置有错时 `reload` 会让 nginx 直接挂掉、网站全断，先 `-t` 能在出事前拦住
+
+`proxy_pass` 末尾**不能加斜杠**，原因写在配置文件注释里。
+
+### 8. 放行 80 端口
+
+云平台控制台的防火墙（或安全组）里加一条：TCP 80，来源 `0.0.0.0/0`。这一步在网页控制台做，不在服务器里 —— 服务器内 nginx 开着 80，云平台这一层不放行，外面照样打不开。
+
+### 验证
+
+```bash
+curl -I http://127.0.0.1/                                  # 200 + text/html
+curl -s 'http://127.0.0.1/api/free-slots?date=2026-11-15'  # JSON，两段空闲
+```
+
+先验本机内部这两条，再看外网：这样万一浏览器打不开，能立刻断定问题在防火墙、不在配置，不用两头猜。
+
+浏览器打开 `http://<公网IP>`。**日期默认是今天，而基线数据在 2026-11-15** —— 第一眼看到一整天空闲是正常的，把日期改过去才有那两段。
+
+### 更新代码上线
+
+推完代码，服务器上固定三步：
+
+```bash
+cd /opt/multi-person-schedule && git pull
+cd frontend && npm run build
+systemctl restart scheduler
+```
+
+- 只有改了 `package.json` 的依赖，才需要多跑一次 `npm install`（前后端各自）
+- `frontend` 变了必须重新 build，否则 nginx 发的还是旧的 `dist/`
+- `backend` 变了必须 restart，否则 systemd 跑的还是内存里的老进程
+
+这两件事都不做，`git pull` 成功也不会有任何变化。**部署后「改了没生效」，九成是漏了这两条中的一条。**
+
+### 这套部署的已知代价
+
+诚实记下来，都是主动接受的：
+
+- **会话在后端内存里**：`systemctl restart scheduler` 之后所有人掉线。要多实例部署或免重启，得把会话挪到共享存储（Redis / 数据库表）
+- **没有 https**：靠 IP 走 http，所以 cookie **不能加 `Secure`**。加了浏览器会直接丢弃，症状是「登录提示成功、页面一闪又回登录框」。哪天绑了域名再补
+- **进程用 root 跑**：练习机可以接受。真实环境要建专用用户，`chown` 之后用 `User=` 指定
+- **数据库密码明文躺在 `.env`**：靠文件权限挡，真实环境要走密钥管理
+- **单机、无备份**：机器挂了数据就没了。这个项目的定位是作品集，不是生产系统
+
 ## 目录
 
 - `shared/` — 接口契约 + Mock 数据，前后端共用同一份，别复制
@@ -258,6 +435,7 @@ v2.0 是破坏性变更，改了接口签名，所以前端必须同步改、同
   - `src/db.js` — 数据库连接池（管连接）
   - `db/schema.sql` — 表结构、约束、基线数据
   - `test/freeSlots.test.js` — 算法测试，`npm test` 跑的就是它
+- `deploy/` — 服务器上的两份配置（nginx 站点、systemd 服务定义）。服务器上软链过来，改配置就有 diff 可查
 
 ## 常见问题
 
@@ -276,7 +454,16 @@ psql -U postgres -d scheduler -f db/schema.sql
 窗口 A 没在跑，或者改了后端代码没重启。先看窗口 A 还在不在。
 
 **登录后一刷新就退回登录框**
-会话存在后端内存里，窗口 A 重启过就全失效了，重新登录即可。这不是 bug。
+会话存在后端内存里，窗口 A 重启过就全失效了，重新登录即可。这不是 bug。部署到服务器后同理，`systemctl restart scheduler` 一次，所有人都要重新登录。
+
+**部署后浏览器打不开（一直转圈 / 超时）**
+云平台的防火墙没放行 80。这个开关在网页控制台，不在服务器里。先在服务器上跑 `curl -I http://127.0.0.1/`：返回 `200` 就说明 nginx 没问题，纯粹是外面进不来。
+
+**部署后能打开页面，但接口全部 404**
+nginx 的 `proxy_pass` 末尾多了斜杠。加了斜杠，nginx 会把 `/api/` 这段前缀替换掉，`/api/free-slots` 到后端就变成 `/free-slots`。
+
+**改了代码推上去，服务器上没变化**
+漏了 `npm run build`（前端）或 `systemctl restart scheduler`（后端）。`git pull` 只改磁盘上的文件，不会重跑构建、也不会重启进程。
 
 **`psql` 里中文显示成乱码**
 终端编码问题，不是数据坏了：`chcp 65001` 之后再查。
