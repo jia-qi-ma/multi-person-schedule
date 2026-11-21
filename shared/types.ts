@@ -1,11 +1,27 @@
 /**
  * 多人时间表 · 前后端共用契约（第 1 格定稿）
  *
- * 契约版本：v1.2 · 2026-11-21
+ * 契约版本：v2.0 · 2026-11-21
  *   v1.0 是草稿，v1.1 是评审后的定稿。
  *   v1.2（第 4 格实现期）：补上 POST /api/events 漏写的错误码，
  *     并新增 DUPLICATE_EVENT（同一人、同一天、起止完全相同 → 409）。
  *     只加不改：老客户端遇到不认识的 code 就显示 error 文案兜底，属于安全扩展，升次版本。
+ *   v2.0（第 5 格加登录，破坏性变更）：
+ *     - POST /api/events 的请求体删掉 userId，身份改由会话（cookie）决定；
+ *     - 所有写接口要求登录，未登录 → 401 UNAUTHENTICATED；
+ *     - DELETE /api/events/:id 只能删自己的，删别人的 → 403 FORBIDDEN；
+ *     - 新增 POST /api/login、POST /api/logout、GET /api/me；
+ *     - 删除 POST /api/users，改为公开的 POST /api/register（自己给自己开户）；
+ *     - DELETE /api/users/:id 只能注销自己，删别人的 → 403 FORBIDDEN；
+ *     - 新增错误码 UNKNOWN_FIELD / UNAUTHENTICATED / LOGIN_FAILED / FORBIDDEN。
+ *     删字段 + 新增 401 = 老客户端必然失败，所以升主版本，不能当安全扩展。
+ *
+ *     ⚠️ v2.0 的这两条（删 POST /api/users、删人只能删自己）是**在发布前**补进去的，
+ *     所以仍然算 v2.0，不升 v2.1 / v3.0。<-- 这条规矩值得记住：
+ *     版本号管的是「已经交出去的东西」。还没提交、没推远程、没有外部调用方时，
+ *     契约只是本地草稿，改它就是改草稿；一旦发布，同样的改动就必须升版本 +
+ *     通知所有调用方。代价差别非常大。
+ *
  *   升版本规则：新增「可选字段」是安全扩展（旧客户端读不到就当没有），升次版本；
  *   改掉 / 删掉已有字段、改字段含义、改错误优先级，属于破坏性变更，
  *   升主版本并通知所有调用方（第 5 格加登录就是这种）。
@@ -55,15 +71,26 @@ export type ApiResponse<T> =
 
 /** 常见错误码。新增只能往后加，已有的值不许改含义（改了等于破坏性变更）。 */
 export type ErrorCode =
+  // ---- 参数与数据（v1.x）----
   | 'INVALID_DATE'
   | 'INVALID_TIME'
   | 'INVALID_PARAMETER'
   | 'NAME_EMPTY'
   | 'NAME_DUPLICATE'
+  /** v2.0 起 POST /api/events 不再返回它：身份来自会话，"查无此人"不成立 */
   | 'USER_NOT_FOUND'
   | 'DUPLICATE_EVENT'
   | 'NOT_FOUND'
   | 'INTERNAL_ERROR'
+  // ---- 身份与权限（v2.0 新增）----
+  /** 401：没登录，或者会话已失效（后端重启后就会失效，见「认证与会话」） */
+  | 'UNAUTHENTICATED'
+  /** 401：登录时姓名或密码不对。故意不区分是哪一个错，避免被人试出谁有账号 */
+  | 'LOGIN_FAILED'
+  /** 403：登录了，但这条数据不归你（删别人的忙碌） */
+  | 'FORBIDDEN'
+  /** 400：请求体里带了契约已经删掉的字段（例如老的 userId），说明调用方还是旧版本 */
+  | 'UNKNOWN_FIELD'
 
 // ============================================================
 // 二、数据模型（对应数据库里的两张表）
@@ -76,6 +103,12 @@ export interface User {
   name: string
   /** 前端画忙碌块用的颜色，纯展示字段，后端不解释它的含义 */
   color: string
+  /**
+   * 注意这里**没有** password / password_hash。
+   * 数据库里存的是 scrypt 哈希，但任何响应都不带它。
+   * 契约里不写这个字段，就是「它不可能被返回」的书面保证 ——
+   * 前端拿不到，也就不会有「顺手打到日志里」的机会。
+   */
 }
 
 /**
@@ -106,24 +139,57 @@ export interface EventWithUser extends Event {
 // 三、每个接口的输入 / 输出
 // ============================================================
 
-/** POST /api/users 的请求体 */
-export interface CreateUserInput {
+/**
+ * POST /api/register 的请求体。
+ *
+ * 为什么是「注册」而不是「加成员」：
+ *   原来的 POST /api/users 是「登录后替别人开户」，等于谁都能造账号；
+ *   而删人只能删自己（见 DELETE /api/users/:id），造出来的账号谁也清不掉。
+ *   改成注册之后，成员一定是本人建的，权责一致：自己的账号自己注册、自己注销。
+ *   附带的好处：注册不需要登录，新人加入不依赖任何现有成员。
+ *
+ * 代价写在契约的【范围边界】里：注册是公开的，等于谁都能加入这个时间表。
+ * 真实产品要加邀请码或管理员审批，那是另一层。
+ */
+export interface RegisterInput {
   name: string
   /**
+   * 自己设的登录密码，必填。
+   * 不给密码，这个人就永远登不进来，「成员」和「账号」会变成两套东西。
+   * 后端只把它变成 scrypt 哈希存库，不回显、不记录。
+   */
+  password: string
+  /**
    * 可选：不传时由后端分配默认调色板里的颜色。
-   * 需求表第 2 节写的是「姓名 + 标识色」，草稿漏收了这个键；
-   * 定为可选，老客户端不传也照样能建成员（安全扩展）。
+   * 需求表第 2 节写的是「姓名 + 标识色」，草稿漏收了这个键。
    */
   color?: string
 }
 
-/** POST /api/events 的请求体 */
+/**
+ * POST /api/events 的请求体。
+ *
+ * v2.0 起**没有 userId**：谁是这条记录的主人，由服务端从会话里读。
+ * 原因不是"少传一个字段更省事"，而是安全边界：
+ * 只要服务端还收客户端送来的身份，任何能发请求的人都能冒充别人录数据，
+ * 登录就变成只挡住页面、挡不住请求的装饰品。
+ */
 export interface CreateEventInput {
-  userId: string
   date: string
   startTime: string
   endTime: string
   title: string
+}
+
+/** POST /api/login 的请求体 */
+export interface LoginInput {
+  name: string
+  password: string
+}
+
+/** POST /api/logout 的返回。重复登出也算成功（幂等），不给前端添负担 */
+export interface LogoutResult {
+  loggedOut: boolean
 }
 
 /** 一段连续的可安排时间 */
@@ -216,15 +282,66 @@ export interface FreeSlotResult {
  * 一个接口 = 方法 + 路径 + 输入 + 输出 + 错误。五件缺一不可。
  * 所有响应都是 ApiResponse<T>，HTTP 状态码另算。
  *
- * | 方法   | 路径                  | 输入                          | 成功 data        | 主要错误（HTTP / code） |
- * |--------|-----------------------|-------------------------------|------------------|--------------------------|
- * | GET    | /api/users            | -                             | User[]           | 500 INTERNAL_ERROR       |
- * | POST   | /api/users            | CreateUserInput (JSON body)   | User             | 400 NAME_EMPTY / 409 NAME_DUPLICATE |
- * | DELETE | /api/users/:id        | 路径参数 id                   | { id: string }   | 404 NOT_FOUND            |
- * | GET    | /api/events?date=     | 查询串 date=YYYY-MM-DD        | EventWithUser[]  | 400 INVALID_DATE / 500 INTERNAL_ERROR |
- * | POST   | /api/events           | CreateEventInput (JSON body)  | Event            | 404 USER_NOT_FOUND / 400 INVALID_DATE / 400 INVALID_TIME / 400 INVALID_PARAMETER / 409 DUPLICATE_EVENT |
- * | DELETE | /api/events/:id       | 路径参数 id                   | { id: string }   | 404 NOT_FOUND            |
- * | GET    | /api/free-slots       | FreeSlotQuery (查询串)        | FreeSlotResult   | 400 INVALID_PARAMETER    |
+ * 【认证与会话（v2.0 新增）】
+ *   登录成功后，服务端通过 Set-Cookie 发一个名为 sid 的随机串：
+ *     sid=<随机值>; HttpOnly; SameSite=Lax; Path=/
+ *   服务端在内存里记一张表：sid → userId。之后每个请求浏览器自动带 cookie，
+ *   后端拿它查表，就知道「这次请求是谁发的」。
+ *
+ *   为什么用 HttpOnly：页面里的 JS 读不到它，XSS 偷不走。
+ *   为什么用 SameSite=Lax：跨站发起的 POST 不会自动带上它，挡掉大部分 CSRF。
+ *   为什么是「服务端存表」而不是签名 token：想踢人只要删表里那条即可；
+ *     代价是后端一重启全部失效（本地开发不是问题），多实例部署时要换共享存储。
+ *   上线必须再加 Secure（只走 HTTPS），本地是 http，加了反而收不到 cookie。
+ *
+ * 【身份从哪来，是这一版最重要的边界】
+ *   - 请求体里**不再**有任何身份字段。客户端说自己是谁，一律不采信。
+ *   - 带 userId 这种已删除的字段 → 400 UNKNOWN_FIELD，让老客户端立刻失败，
+ *     而不是"悄悄用会话身份存下去"（那样会存到错误的人名下，且没人发现）。
+ *   - Event.userId 在库里还在，它记录的是「这条忙碌属于谁」，
+ *     只是不再由请求体提供，而是写入时从会话取。
+ *
+ * 【谁能做什么（授权表，v2.0）】
+ *   认证（Authentication）= 你是谁；授权（Authorization）= 这件事你能不能做。
+ *   登录只解决前者，后者必须**逐个接口单独定** —— 这是加登录时最容易漏的一步。
+ *   （本项目就漏过：一开始 DELETE /api/users/:id 只挂了「要登录」，
+ *     结果任何一个成员都能把别人连人带记录删光。实测才发现。）
+ *
+ *   | 接口                   | 谁能做                              |
+ *   |------------------------|-------------------------------------|
+ *   | POST   /api/register   | 任何人（公开，自己给自己开户）      |
+ *   | DELETE /api/users/:id  | 只有本人（= 注销自己的账号）        |
+ *   | POST   /api/events     | 任何登录用户，但只能记在自己名下    |
+ *   | DELETE /api/events/:id | 只有这条记录的主人                  |
+ *   | 所有 GET               | 任何人（读接口公开，见范围边界）    |
+ *
+ *   共同点：判断依据只有一个 —— 会话里的 userId 与资源归属比对。
+ *   客户端送来的任何 id 都不作为授权依据（body 里的 userId 直接拒绝）。
+ *
+ * 【v1.2 → v2.0 升级指引（给调用方看的）】
+ *   1. 先调 POST /api/login 拿 cookie，且后续请求要带上 cookie
+ *      （浏览器默认同源会自动带；Node / curl 要自己保存并回传）；
+ *   2. POST /api/events 删掉 body 里的 userId；
+ *   3. POST /api/users **已删除** → 改用 POST /api/register。
+ *      区别不只是改名：原来是「登录后代别人开户」，现在是「自己注册自己」，
+ *      所以它不需要登录，也没有 userId 这个入参。
+ *   4. DELETE /api/users/:id 只接受自己的 id（注销自己），删别人会 403；
+ *   5. 处理两个新状态：401（去登录）、403（不是你的记录 / 不是你本人）。
+ *   6. 老客户端不做这些改动的话，第一次写请求就会收到 400 UNKNOWN_FIELD，
+ *      这是有意设计的：宁可当场报错，也不要安静地写错数据。
+ *
+ * | 方法   | 路径                  | 登录 | 输入                          | 成功 data        | 主要错误（HTTP / code） |
+ * |--------|-----------------------|------|-------------------------------|------------------|--------------------------|
+ * | POST   | /api/login            | 否   | LoginInput (JSON body)        | User             | 400 INVALID_PARAMETER / 401 LOGIN_FAILED |
+ * | POST   | /api/register         | 否   | RegisterInput (JSON body)     | User             | 400 NAME_EMPTY / 400 INVALID_PARAMETER / 409 NAME_DUPLICATE |
+ * | POST   | /api/logout           | 否   | -                             | LogoutResult     | -                        |
+ * | GET    | /api/me               | 是   | -                             | User             | 401 UNAUTHENTICATED      |
+ * | GET    | /api/users            | 否   | -                             | User[]           | 500 INTERNAL_ERROR       |
+ * | DELETE | /api/users/:id        | 是   | 路径参数 id（必须是自己的 id）| { id: string }   | 401 UNAUTHENTICATED / 404 NOT_FOUND / 403 FORBIDDEN |
+ * | GET    | /api/events?date=     | 否   | 查询串 date=YYYY-MM-DD        | EventWithUser[]  | 400 INVALID_DATE / 500 INTERNAL_ERROR |
+ * | POST   | /api/events           | 是   | CreateEventInput (JSON body)  | Event            | 401 UNAUTHENTICATED / 400 UNKNOWN_FIELD / 400 INVALID_DATE / 400 INVALID_TIME / 400 INVALID_PARAMETER / 409 DUPLICATE_EVENT |
+ * | DELETE | /api/events/:id       | 是   | 路径参数 id                   | { id: string }   | 401 UNAUTHENTICATED / 404 NOT_FOUND / 403 FORBIDDEN |
+ * | GET    | /api/free-slots       | 否   | FreeSlotQuery (查询串)        | FreeSlotResult   | 400 INVALID_PARAMETER    |
  *
  * 线上格式补充（类型里看不出来的部分）：
  *   - 查询串里，数字也是字符串："minMinutes=30"、"bufferMinutes=15"；
@@ -233,22 +350,37 @@ export interface FreeSlotResult {
  *       { "success": false, "error": "中文说明", "code": "INVALID_DATE" }
  *     code 可选，老版本可能不带；前端按 code 分支，读不到就兜底只显示 error。
  *     只看状态码不够，给用户看的原因得从 error 里读。
+ *   - 401 也是同一个信封，不是空响应。前端遇到 401 应该「跳去登录」，
+ *     而不是当成网络错误提示「连不上后端」—— 这两种情况的处理完全不同。
  *   - GET 用于「读」，不会改数据；POST / DELETE 用于「写」。
  *     浏览器刷新、重试、缓存都只对 GET 安全。
  *   - 表里没有写 "-" 的接口：读接口照样可能 500，前端仍要写错误处理。
- *   - 【删除成员的口径】DELETE /api/users/:id 会连带删掉这个人名下的
- *     全部忙碌记录（2026-11-21 拍板）。忙碌靠 userId 依附于成员，人没了
- *     记录就无所归属；代价是删人会让共同空闲变多，属不可逆操作，
- *     前端删之前必须二次确认。这条当初漏写，实现时才补上 —— 契约少的
+ *   - 【删除成员的口径】v2.0 起这个接口只有一个合法用途：**注销自己**。
+ *     路径里的 id 必须等于会话里的 userId，否则 403 FORBIDDEN。
+ *     为什么不是「谁都能删」：没有管理员，就推导不出「谁能删别人」。
+ *     登录只回答了「你是谁」，没回答「这件事你凭什么做」——授权要逐个接口单独定。
+ *     当初把写接口一律加上登录就以为安全了，漏的正是这一句（用户实测发现）。
+ *   - 注销会连带删掉这个人名下的全部忙碌记录（2026-11-21 拍板）。
+ *     忙碌靠 userId 依附于成员，人没了记录就无所归属；代价是注销会让共同空闲变多，
+ *     属不可逆操作，前端点之前必须二次确认。这条当初也漏写 —— 契约少的
  *     往往是这种「关联数据怎么办」，不是字段。
  *   - 【坏 JSON】body 不是合法 JSON 时，回 400 INVALID_PARAMETER
  *     （不落到 express 默认的 HTML 错误页，否则前端解析不了、会误报连不上）。
  *
  * 【错误优先级】一个请求同时有多个错时，后端按固定顺序只报第一个：
- *   ① 引用的资源是否存在（USER_NOT_FOUND / NOT_FOUND）
- *   ② 参数格式是否合法（INVALID_DATE / INVALID_TIME / INVALID_PARAMETER）
+ *   ① 是否登录（401 UNAUTHENTICATED）
+ *   ② 请求体是否带了已删除的字段（400 UNKNOWN_FIELD）
+ *   ③ 引用的资源是否存在（404 NOT_FOUND）
+ *   ④ 这条数据是否归你（403 FORBIDDEN）
+ *   ⑤ 参数格式是否合法（400 INVALID_DATE / INVALID_TIME / INVALID_PARAMETER）
  *   顺序写进契约，同样的输入才永远回同一个 code，前端与测试才有预期。
  *   改动这个顺序也属于破坏性变更。
+ *   三条理由都值得记住：
+ *     - 认证排最前：没登录的人不该从错误信息里探出系统里有什么；
+ *     - UNKNOWN_FIELD 排在资源检查前：它是「你用的是旧契约」的信号，
+ *       越早暴露越好；若排在后面，老客户端可能先收到 404，误以为数据没了；
+ *     - 404 在 403 前：先确认东西存不存在，再谈归不归你；反过来会把
+ *       「这条记录存在」泄露给跟它无关的人。
  *
  * 【扩展时怎么改契约】
  *   新增「可选字段」= 安全扩展（旧客户端读不到就当没有），升次版本。
@@ -256,8 +388,27 @@ export interface FreeSlotResult {
  *      本次进来的 bufferMinutes、code、color 都是这么加的。
  *   改掉 / 删掉已有字段、改字段含义、改错误优先级 = 破坏性变更，
  *   升主版本 + 通知所有调用方。
- *      例：第 5 格加登录 → CreateEventInput.userId 从请求体移走，
+ *      例：v2.0 就是这么改的 —— CreateEventInput.userId 从请求体移走，
  *          改由后端从会话注入；库里 Event.userId 还在，变的是契约的输入。
+ *
+ * 【v2.0 的范围边界：明确没做的事】
+ *   - 读接口仍然公开：不登录也能看成员列表、谁在忙、哪段时间空。
+ *     这是主动取舍，代价是忙碌时段对所有人可见；真要隔离，得给每个读接口
+ *     加权限判断，属于另一层设计，不在本期。
+ *   - 没有角色：登录后所有人权限一致，所以系统里**不存在「删别人」这个动作**，
+ *     只能注销自己。真实项目要引入管理员角色，那是「谁能做什么」的授权模型，
+ *     比登录更复杂，不在本期。
+ *   - 【注册是公开的】谁都能给自己注册一个成员，等于谁都能加入这个时间表。
+ *     好处是新人加入不依赖任何现有成员；代价是没有准入控制。
+ *     真实产品要加邀请码、管理员审批或邮箱验证，那是另一层，不在本期。
+ *   - 【已知未做】没有管理员，所以没有「踢人」能力：某个账号乱填数据时，
+ *     只能让本人注销，别人无法强制移除。要解决得引入角色。
+ *     （「误建了打错名字的成员」这个问题随注册制消失：成员一定是本人建的，
+ *       打错名字也只能是他自己打错，自己注销即可。）
+ *   - 密码没有找回、没有强度校验、没有登录失败次数限制。
+ *   - 会话存在内存里：后端重启即全部失效；多实例部署要换成共享存储。
+ *   写清楚这些不是自曝短处，而是让接手的人知道「哪里还没做、为什么没做」，
+ *   否则下一个人会把「没做」当成 bug，或者误以为已经安全。
  *
  * 【为什么 API 清单和类型留在同一份文件】
  *   契约五件事里，方法 / 路径 / 错误 / 线上格式都是类型表达不出来的部分。
