@@ -1,0 +1,11 @@
+{
+  "name": "schedule-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite"
+  },
+  "dependencies": {
+    "vite": "^8.3.8"
+  }
+}
