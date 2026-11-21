@@ -24,7 +24,13 @@ DROP TABLE IF EXISTS users;
 CREATE TABLE users (
   id    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name  text NOT NULL UNIQUE,
-  color text NOT NULL
+  color text NOT NULL,
+
+  -- 密码只存哈希，永远不存原文。
+  -- 格式是 scrypt$盐$哈希 三段（见 src/auth.js）：
+  -- 带算法前缀是为了以后能换算法，老用户继续用老办法验，不必全体重设密码。
+  -- 这里 NOT NULL：没有密码的成员等于登不进来，不如建的时候就拦住。
+  password_hash text NOT NULL
 );
 
 CREATE TABLE events (
@@ -57,9 +63,18 @@ CREATE INDEX events_by_date ON events (date);
 -- ============================================================
 -- 基线数据（和 data.js 里原来那两条一致，保证页面显示不变）
 -- ============================================================
-INSERT INTO users (id, name, color) VALUES
-  ('00000000-0000-0000-0000-000000000001', '张三', '#4f8ef7'),
-  ('00000000-0000-0000-0000-000000000002', '李四', '#f2994a');
+--
+-- 下面两串 password_hash 对应的密码（仅供本机演示，别在真实环境用）：
+--   张三  zhangsan123
+--   李四  lisi123
+-- 哈希是用 src/auth.js 的 hashPassword() 现算出来的，算法、盐、长度完全一致，
+-- 所以页面直接登录就能过。想换密码：node 里跑一次 hashPassword('新密码')，
+-- 把结果 UPDATE 到 users.password_hash（不要反过来试图"解密"）。
+INSERT INTO users (id, name, color, password_hash) VALUES
+  ('00000000-0000-0000-0000-000000000001', '张三', '#4f8ef7',
+   'scrypt$bc1ec6ccef8a43932e7eaef3c8f6ef67$cc806b3d1021a72a1ee2be4cba943c392f1ed027b099dfbc96f0494dc9e95b5cc64bff3a69e857574a998f0085efe7fde233052ec2a7aba0d8ad2d533f17aab6'),
+  ('00000000-0000-0000-0000-000000000002', '李四', '#f2994a',
+   'scrypt$ca5441bbc19574f8c41d0ffae155bea8$c40f3be3a3bc42edbc0114ad53f18e5cc9fb2676d55a8362a6bf040093d43e862ef3c8a376f60d7f8115f649a3f2aa295c6ce145c7a59d38b26bdf6204e79042');
 
 INSERT INTO events (user_id, date, start_time, end_time, title) VALUES
   ('00000000-0000-0000-0000-000000000001', '2026-11-15', '09:00', '11:00', '组会'),

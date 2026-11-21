@@ -1,4 +1,21 @@
 /**
+ * 前端入口（契约 v2.0）。
+ *
+ * 这一版和前几版最大的不同：页面不再一打开就拉数据，
+ * 而是先问一句「我是谁」（GET /api/me），再由答案决定显示登录框还是整套界面。
+ *
+ * 另外有一条纪律贯穿全文：**前端不自己判断「我能不能做这件事」**。
+ * 这里所有的显示/隐藏都只是为了让界面干净，真正的权限判断只有一个地方 —— 后端。
+ */
+
+/**
+ * 当前登录的人。null 表示未登录。
+ * id 用来判断「这条忙碌是不是我的」（只影响要不要画删除按钮），
+ * name 用来显示「以谁的身份录入」。
+ */
+let currentUser = null
+
+/**
  * 日期不在模块加载时算死，而是每次发请求前现读输入框。
  * 如果写成 const DATE = ...，页面一打开就定格了 —— 用户之后改日期，
  * 请求还落在旧的那天，最难查的是它不报错。
@@ -12,18 +29,33 @@ const eventsUrl = () => `/api/events?date=${currentDate()}`
 const USERS_URL = '/api/users'
 
 const els = {
+  boot: document.querySelector('#boot'),
+  loginView: document.querySelector('#login-view'),
+  loginForm: document.querySelector('#login-form'),
+  loginName: document.querySelector('#login-name'),
+  loginPassword: document.querySelector('#login-password'),
+  loginSubmit: document.querySelector('#login-form button'),
+  loginFeedback: document.querySelector('#login-feedback'),
+
+  registerForm: document.querySelector('#register-form'),
+  registerName: document.querySelector('#register-name'),
+  registerPassword: document.querySelector('#register-password'),
+  registerSubmit: document.querySelector('#register-form button'),
+  registerFeedback: document.querySelector('#register-feedback'),
+
+  appView: document.querySelector('#app-view'),
+  currentUser: document.querySelector('#current-user'),
+  appFeedback: document.querySelector('#app-feedback'),
+  logout: document.querySelector('#logout'),
+
   datePicker: document.querySelector('#date-picker'),
   meta: document.querySelector('#meta'),
   slots: document.querySelector('#slots'),
   users: document.querySelector('#users'),
-  form: document.querySelector('#user-form'),
-  name: document.querySelector('#user-name'),
-  submit: document.querySelector('#user-form button'),
-  feedback: document.querySelector('#user-feedback'),
   events: document.querySelector('#events'),
   eventDate: document.querySelector('#event-date'),
   eventForm: document.querySelector('#event-form'),
-  eventUser: document.querySelector('#event-user'),
+  eventAs: document.querySelector('#event-as'),
   eventStart: document.querySelector('#event-start'),
   eventEnd: document.querySelector('#event-end'),
   eventTitle: document.querySelector('#event-title'),
@@ -32,23 +64,74 @@ const els = {
 }
 
 /**
- * 所有请求都从这里走。它只做两件事：
+ * 所有请求都从这里走。它现在做三件事：
  *   1. 后端连不上时也回一个统一形状 —— 页面各处不用各写一遍 try/catch
  *   2. 把统一信封原样交回去 —— 成功读 data、失败读 error / code，由调用方决定
+ *   3. **401 全站只在这一处处理**：任何一个接口说「你没登录」，就统一退回登录框
+ *
+ * 第 3 条是这一版最值得记的一处。如果让每个调用点自己判断 401，
+ * 早晚会漏一个，而漏掉的那个会显示「连不上后端」—— 排查方向直接被带偏。
+ * 把「认证失败」做成唯一的出口，以后加多少个接口都不用再想这件事。
+ *
+ * 注意不判断 /api/login 自己的 401：那是 LOGIN_FAILED（密码错），
+ * 不是 UNAUTHENTICATED（没登录），按 code 区分，不按状态码。
  */
 async function api(url, options) {
   try {
+    // 浏览器会自动带上 HttpOnly 的 sid cookie，前端一行都不用写。
+    // 这也是为什么用 cookie 而不是把 token 存进 localStorage：
+    // 存在 JS 能读到的地方，一次 XSS 就被偷走了。
     const res = await fetch(url, options)
-    return await res.json()
+    const body = await res.json()
+
+    if (!body.success && body.code === 'UNAUTHENTICATED') {
+      showLogin(body.error || '请先登录')
+    }
+    return body
   } catch {
     return { success: false, error: '连不上后端：看看窗口 A 是否还在跑', code: 'NETWORK' }
   }
 }
 
-/** 提示行统一走这里，两个表单各有一行，别各写一套 */
+/** 提示行统一走这里，各表单各有一行，别各写一套 */
 function setFeedback(el, text, isError) {
   el.textContent = text
   el.className = isError ? 'hint error' : 'hint ok'
+}
+
+/** 切到登录框。所有「回到未登录」的路径（启动时没登录、会话过期、主动登出）都走它 */
+function showLogin(message = '') {
+  currentUser = null
+
+  els.boot.hidden = true
+  els.appView.hidden = true
+  els.loginView.hidden = false
+
+  // 中性样式，不用红色：未登录不是错误，会话过期也不是
+  els.loginFeedback.textContent = message
+  els.loginFeedback.className = 'hint'
+  els.loginPassword.value = ''
+
+  // 顺手清掉上一个人的数据。读接口是公开的，不清的话
+  // 下一个人登录前的那一瞬间，屏幕上还留着别人的忙碌时段
+  els.slots.innerHTML = ''
+  els.meta.textContent = ''
+  els.users.innerHTML = ''
+  els.events.innerHTML = ''
+  els.appFeedback.textContent = '' // 上一个人「已删除」「已注销」的提示也别留给下一个人
+}
+
+/** 切到主界面。currentUser 只在这里被赋值，别处只读 */
+function enterApp(user) {
+  currentUser = user
+
+  els.boot.hidden = true
+  els.loginView.hidden = true
+  els.appView.hidden = false
+
+  els.currentUser.textContent = user.name
+  els.eventAs.textContent = user.name // 录进去的一定是这个人，界面得说实话
+  els.loginPassword.value = '' // 密码不该在输入框里多留一秒
 }
 
 async function loadUsers() {
@@ -67,50 +150,44 @@ async function loadUsers() {
     const name = document.createElement('span')
     name.textContent = user.name
 
-    const del = document.createElement('button')
-    del.className = 'del'
-    del.textContent = '删除'
-    del.addEventListener('click', () => removeUser(user.id, user.name))
+    item.append(dot, name)
 
-    item.append(dot, name, del)
+    // 只有自己那一行有按钮，而且它的语义是「注销账号」，不是「删掉这个人」。
+    // 系统里没有管理员，所以「删别人」这个动作根本不存在 —— 后端会回 403。
+    if (currentUser && user.id === currentUser.id) {
+      const del = document.createElement('button')
+      del.className = 'del'
+      del.textContent = '注销'
+      del.addEventListener('click', () => removeSelf(user.name))
+      item.appendChild(del)
+    }
+
     els.users.appendChild(item)
   })
-  fillUserOptions(body.data)
 }
 
 /**
- * 删成员。这不是「删一条记录」那么轻 —— 后端会连带清掉他名下的忙碌，
- * 而且不可撤销，所以发请求前先用 confirm 把后果说清楚。
- * 前端这道只是防误点；真正的删除口径在后端，改口径要动后端和契约。
+ * 注销自己的账号。
+ *
+ * 这不是「删一条记录」那么轻 —— 后端会连带删掉你名下所有忙碌，
+ * 而且马上把你登出，所以发请求前先用 confirm 把后果说清楚。
+ * 和删忙碌一样：前端这道只是防误点，真正的判断在后端。
  */
-async function removeUser(id, name) {
-  const confirmed = confirm(`删除成员「${name}」？他名下的忙碌记录会一起删掉。`)
+async function removeSelf(name) {
+  const confirmed = confirm(
+    `注销「${name}」这个账号？你名下所有忙碌记录会一起删掉，并且立刻登出。这个操作不可撤销。`,
+  )
   if (!confirmed) return
 
-  const body = await api(`/api/users/${id}`, { method: 'DELETE' })
+  const body = await api(`/api/users/${currentUser.id}`, { method: 'DELETE' })
   if (!body.success) {
-    setFeedback(els.feedback, body.error, true)
+    setFeedback(els.appFeedback, body.error, true)
     return
   }
-  setFeedback(els.feedback, `已删除 ${name}，他名下的忙碌记录一并清掉`, false)
-  await refresh()
-}
 
-/**
- * 下拉框跟着成员列表走。
- * 注意要先记住当前选中值再重建 —— refresh() 每次都重拉成员，
- * 不记的话用户刚选好的人会被重置成第一个。
- */
-function fillUserOptions(users) {
-  const selected = els.eventUser.value
-  els.eventUser.innerHTML = ''
-  users.forEach((user) => {
-    const option = document.createElement('option')
-    option.value = user.id
-    option.textContent = user.name
-    els.eventUser.appendChild(option)
-  })
-  if (selected) els.eventUser.value = selected
+  // 后端已经把会话划掉了，界面也得回到登录框，否则会停在一个「已经不存在的人」的主界面上
+  showLogin('账号已注销')
+  els.loginForm.reset()
 }
 
 async function loadSlots() {
@@ -151,12 +228,18 @@ async function loadEvents() {
     const label = document.createElement('span')
     label.textContent = `${ev.startTime} – ${ev.endTime}　${ev.user ? ev.user.name : '（已删除的成员）'} · ${ev.title}`
 
-    const del = document.createElement('button')
-    del.className = 'del'
-    del.textContent = '删除'
-    del.addEventListener('click', () => removeEvent(ev.id))
+    item.append(dot, label)
 
-    item.append(dot, label, del)
+    // 只给自己的记录画删除按钮。这只是为了界面干净：
+    // 真去删别人的，后端会回 403。前端的判断永远只是「建议」，不是权限
+    if (currentUser && ev.userId === currentUser.id) {
+      const del = document.createElement('button')
+      del.className = 'del'
+      del.textContent = '删除'
+      del.addEventListener('click', () => removeEvent(ev.id))
+      item.appendChild(del)
+    }
+
     els.events.appendChild(item)
   })
 }
@@ -179,47 +262,123 @@ function refresh() {
   return Promise.all([loadUsers(), loadSlots(), loadEvents()])
 }
 
-els.form.addEventListener('submit', async (event) => {
-  event.preventDefault() // 表单默认会让浏览器整页刷新，必须拦掉
+// ---------- 登录 / 登出 ----------
 
-  const name = els.name.value.trim()
-  if (!name) {
-    setFeedback(els.feedback, '名字不能为空', true) // 前端先挡一次，省一趟往返；后端那道校验照样保留
+els.loginForm.addEventListener('submit', async (event) => {
+  event.preventDefault()
+
+  const name = els.loginName.value.trim()
+  const password = els.loginPassword.value
+
+  if (!name || !password) {
+    setFeedback(els.loginFeedback, '姓名和密码都要填', true)
     return
   }
 
-  els.submit.disabled = true
+  els.loginSubmit.disabled = true
   try {
-    const body = await api(USERS_URL, {
+    const body = await api('/api/login', {
       method: 'POST',
-      // 少了这一行，express.json() 不认识这串 body，后端会当没收到
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }), // 线上永远是字符串，不是对象
+      body: JSON.stringify({ name, password }),
     })
 
     if (!body.success) {
-      setFeedback(els.feedback, body.error, true) // 后端给的是人话，直接显示；输入框保留，方便改名重试
+      setFeedback(els.loginFeedback, body.error, true)
+      els.loginPassword.value = '' // 只清密码，姓名留着方便重试
       return
     }
 
-    els.form.reset()
-    setFeedback(els.feedback, `已添加 ${body.data.name}`, false)
+    // 登录成功后后端已经把 sid 写进 cookie 了，前端不需要存任何东西。
+    // 这一点常被忽略：换个标签页、刷新页面，登录状态都还在
+    enterApp(body.data)
+    els.loginForm.reset()
     await refresh()
   } finally {
-    els.submit.disabled = false // 成功失败都要恢复，否则按钮会一直灰着
+    els.loginSubmit.disabled = false
   }
 })
+
+els.logout.addEventListener('click', async () => {
+  // 登出请求失败也要把界面切回登录框：
+  // 后端那边会话可能已经没了，把人留在主界面上是更糟的状态
+  await api('/api/logout', { method: 'POST' })
+  showLogin('已登出')
+  els.loginForm.reset()
+})
+
+/**
+ * 注册 = 自己给自己开户。这是「加成员」现在唯一的入口，放在登录页上。
+ *
+ * 注册成功后，后端不会替你登录（它只回 201 + User）。所以这里紧接着
+ * 用同一份姓名密码调一次 /api/login，用户看起来是「注册完直接进去了」。
+ * 这是**前端把两个接口串起来**，而不是后端偷偷多做了一个动作 ——
+ * 接口各自只管一件事，才好在别处复用、也才好单独测。
+ */
+els.registerForm.addEventListener('submit', async (event) => {
+  event.preventDefault()
+
+  const name = els.registerName.value.trim()
+  const password = els.registerPassword.value
+
+  // 前端先挡一次，省一趟往返；后端那两道校验（NAME_EMPTY / 密码长度）照样保留
+  if (!name) {
+    setFeedback(els.registerFeedback, '名字不能为空', true)
+    return
+  }
+  if (password.length < 6) {
+    setFeedback(els.registerFeedback, '密码至少 6 位', true)
+    return
+  }
+
+  els.registerSubmit.disabled = true
+  try {
+    const body = await api('/api/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, password }),
+    })
+
+    if (!body.success) {
+      setFeedback(els.registerFeedback, body.error, true) // 409 重名也走这儿
+      return
+    }
+
+    // 第二步：注册成功，马上用同一份凭据登录
+    const loginBody = await api('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, password }),
+    })
+
+    if (!loginBody.success) {
+      // 账号已经建好了，只是自动登录没成功。这时不能假装成功 ——
+      // 把姓名填进登录框，让用户手动登一次
+      els.loginName.value = name
+      els.registerForm.reset()
+      setFeedback(els.loginFeedback, `${body.data.name} 注册成功，请用刚设的密码登录`, false)
+      return
+    }
+
+    enterApp(loginBody.data)
+    els.registerForm.reset()
+    els.loginForm.reset()
+    await refresh()
+  } finally {
+    els.registerSubmit.disabled = false // 成功失败都要恢复，否则按钮会一直灰着
+  }
+})
+
+// ---------- 业务表单 ----------
 
 els.eventForm.addEventListener('submit', async (event) => {
   event.preventDefault()
 
-  const userId = els.eventUser.value
   const startTime = els.eventStart.value
   const endTime = els.eventEnd.value
   const title = els.eventTitle.value.trim()
 
   // 这几条都是「不值一趟往返」的明显错误；后端照样会再校验一遍
-  if (!userId) return setFeedback(els.eventFeedback, '还没有成员，先在上面添加一个', true)
   if (!startTime || !endTime) return setFeedback(els.eventFeedback, '开始和结束时间都要填', true)
   if (startTime >= endTime) return setFeedback(els.eventFeedback, '开始时间必须早于结束时间', true)
   if (!title) return setFeedback(els.eventFeedback, '事由不能为空', true)
@@ -229,16 +388,18 @@ els.eventForm.addEventListener('submit', async (event) => {
     const body = await api('/api/events', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, date: currentDate(), startTime, endTime, title }),
+      // 和 v1.x 唯一的区别就在这一行：body 里没有 userId 了。
+      // 谁在录，由后端从会话里取 —— 前端说了不算
+      body: JSON.stringify({ date: currentDate(), startTime, endTime, title }),
     })
 
     if (!body.success) {
-      // 409 DUPLICATE_EVENT、404 USER_NOT_FOUND 都从这儿出来，文案直接用后端的
+      // 409 DUPLICATE_EVENT、400 UNKNOWN_FIELD 都从这儿出来，文案直接用后端的
       setFeedback(els.eventFeedback, body.error, true)
       return
     }
 
-    els.eventTitle.value = '' // 只清事由，人和时间留着：连着录几条更顺手
+    els.eventTitle.value = '' // 只清事由，时间留着：连着录几条更顺手
     setFeedback(els.eventFeedback, '已录入', false)
     await refresh()
   } finally {
@@ -253,5 +414,20 @@ els.datePicker.addEventListener('change', () => {
   refresh()
 })
 
-// 页面打开先拉一次
-refresh()
+/**
+ * 启动顺序：先问「我是谁」，再决定画面。
+ *
+ * 不能一上来就 refresh()：那会先请求三个读接口（它们是公开的，能成功），
+ * 界面闪一下别人的数据，然后才因为未登录被踢回登录框。
+ */
+async function boot() {
+  const body = await api('/api/me')
+
+  // 失败时 api() 已经把界面切到登录框了，这里不用重复处理
+  if (!body.success) return
+
+  enterApp(body.data)
+  await refresh()
+}
+
+boot()

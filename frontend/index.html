@@ -34,38 +34,90 @@
       .hint.ok { color: #27ae60; }
       button[disabled] { opacity: 0.5; }
       .del { margin-left: 0.5rem; font-size: 0.8rem; }
+      /* 顶栏：谁登录着 + 登出。放在最上面，因为它是整页的前提 */
+      #whoami {
+        display: flex;
+        gap: 0.6rem;
+        align-items: center;
+        font-size: 0.9rem;
+        padding-bottom: 0.6rem;
+        border-bottom: 1px solid #ddd;
+      }
+      #logout { margin-left: auto; }
     </style>
   </head>
   <body>
-    <h1>共同空闲时段</h1>
-    <!-- 日期放顶部：它管整页，一改上面空闲段和下面忙碌列表都得跟着换 -->
-    <p>
-      <label for="date-picker">日期</label>
-      <input id="date-picker" type="date" value="2026-11-15" />
-    </p>
-    <p id="meta"></p>
-    <ul id="slots"></ul>
+    <!-- 三个区域互斥：启动时先判断登录状态，再决定显示哪一个。
+         两个都先 hidden，是为了避免「先闪一下完整界面、再被踢回登录框」 -->
+    <p id="boot">正在检查登录状态…</p>
 
-    <h2>成员</h2>
-    <ul id="users"></ul>
+    <!-- 未登录：只能登录或注册，别的什么都不给看。
+         注册放在这里而不是主界面里，是因为「成员」只能由本人注册产生 —— 
+         登录后谁都没有「替别人开户」的能力。 -->
+    <section id="login-view" hidden>
+      <h1>登录</h1>
+      <form id="login-form">
+        <input id="login-name" placeholder="姓名" autocomplete="username" />
+        <input
+          id="login-password"
+          type="password"
+          placeholder="密码"
+          autocomplete="current-password"
+        />
+        <button type="submit">登录</button>
+        <span id="login-feedback" class="hint"></span>
+      </form>
 
-    <form id="user-form">
-      <input id="user-name" placeholder="成员姓名" autocomplete="off" />
-      <button type="submit">添加成员</button>
-      <span id="user-feedback" class="hint"></span>
-    </form>
+      <h2>还没有账号？注册一个</h2>
+      <form id="register-form">
+        <input id="register-name" placeholder="你的姓名" autocomplete="off" />
+        <input
+          id="register-password"
+          type="password"
+          placeholder="设置密码（至少 6 位）"
+          autocomplete="new-password"
+        />
+        <button type="submit">注册</button>
+        <span id="register-feedback" class="hint"></span>
+      </form>
 
-    <h2>忙碌时段 · <span id="event-date"></span></h2>
-    <ul id="events"></ul>
+      <p class="hint">种子账号：张三 / zhangsan123，李四 / lisi123（仅本机演示用）</p>
+    </section>
 
-    <form id="event-form">
-      <select id="event-user"></select>
-      <input id="event-start" type="time" value="09:00" />
-      <input id="event-end" type="time" value="10:00" />
-      <input id="event-title" placeholder="事由，如 组会" autocomplete="off" />
-      <button type="submit">录入忙碌</button>
-      <span id="event-feedback" class="hint"></span>
-    </form>
+    <!-- 登录后：原来那一整套 -->
+    <section id="app-view" hidden>
+      <p id="whoami">
+        <span>当前用户：<strong id="current-user"></strong></span>
+        <span id="app-feedback" class="hint"></span>
+        <button id="logout" type="button">登出</button>
+      </p>
+
+      <h1>共同空闲时段</h1>
+      <!-- 日期放顶部：它管整页，一改上面空闲段和下面忙碌列表都得跟着换 -->
+      <p>
+        <label for="date-picker">日期</label>
+        <input id="date-picker" type="date" value="2026-11-15" />
+      </p>
+      <p id="meta"></p>
+      <ul id="slots"></ul>
+
+      <h2>成员</h2>
+      <ul id="users"></ul>
+      <p class="hint">成员由本人注册产生，这里只能看，不能替别人添加。</p>
+
+      <h2>忙碌时段 · <span id="event-date"></span></h2>
+      <ul id="events"></ul>
+
+      <!-- 没有「给谁录」的下拉框了：录进去的一定是当前登录的人 -->
+      <form id="event-form">
+        <span class="hint">以 <strong id="event-as"></strong> 的身份录入</span>
+        <input id="event-start" type="time" value="09:00" />
+        <input id="event-end" type="time" value="10:00" />
+        <input id="event-title" placeholder="事由，如 组会" autocomplete="off" />
+        <button type="submit">录入忙碌</button>
+        <span id="event-feedback" class="hint"></span>
+      </form>
+    </section>
 
     <script type="module" src="/src/main.js"></script>
   </body>

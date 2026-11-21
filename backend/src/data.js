@@ -38,6 +38,30 @@ async function findUser(id) {
 }
 
 /**
+ * 按名字找成员，**连密码哈希一起返回**，只给登录用。
+ *
+ * 这是全项目唯一会取出 password_hash 的地方。
+ * 别的地方要用户信息就用 findUser()，它不查这一列 ——
+ * 少一个出口，就少一次「不小心把哈希塞进响应里」的机会。
+ */
+async function findUserByName(name) {
+  const { rows } = await query(
+    'SELECT id, name, color, password_hash AS "passwordHash" FROM users WHERE name = $1',
+    [name],
+  )
+  return rows[0] || null
+}
+
+/**
+ * 按 id 找一条忙碌，只带归属信息，给「能不能删」的判断用。
+ * 不查完整字段，是因为这里不需要；查询越窄，改表时越不容易被牵连。
+ */
+async function findEventById(id) {
+  const { rows } = await query('SELECT id, user_id AS "userId" FROM events WHERE id::text = $1', [id])
+  return rows[0] || null
+}
+
+/**
  * 某人某天的忙碌，连成员信息一起带回来。
  *
  * 为什么用 JOIN 而不是先查 events、再对每条调 findUser：
@@ -87,7 +111,7 @@ async function listEventsByDate(date) {
  * 插入冲突时 PostgreSQL 报 23505，这里翻译成 null。
  * 仍然返回 null 表示「没存成」：存储层不认识 HTTP 状态码，回什么错误由上层决定。
  */
-async function addUser({ name, color }) {
+async function addUser({ name, color, passwordHash }) {
   // 颜色：没指定就从调色板里轮着取一个。数量来自数据库，不再是数组长度
   let picked = color
   if (!picked) {
@@ -97,8 +121,9 @@ async function addUser({ name, color }) {
 
   try {
     const { rows } = await query(
-      'INSERT INTO users (name, color) VALUES ($1, $2) RETURNING id, name, color',
-      [name, picked],
+      // RETURNING 里故意不写 password_hash：存进去是一回事，回出来是另一回事
+      'INSERT INTO users (name, color, password_hash) VALUES ($1, $2, $3) RETURNING id, name, color',
+      [name, picked, passwordHash],
     )
     return rows[0]
   } catch (err) {
@@ -154,4 +179,14 @@ async function removeUser(id) {
   return rows[0] || null
 }
 
-module.exports = { listUsers, listEventsByDate, addUser, findUser, addEvent, removeEvent, removeUser }
+module.exports = {
+  listUsers,
+  findUser,
+  findUserByName,
+  listEventsByDate,
+  findEventById,
+  addUser,
+  addEvent,
+  removeEvent,
+  removeUser,
+}
