@@ -37,7 +37,7 @@ function parseNumber(raw, fallback) {
   return Number.isFinite(n) ? n : NaN
 }
 
-app.get('/api/free-slots', (req, res) => {
+app.get('/api/free-slots', async (req, res) => {
   const { date } = req.query
 
   // 参数格式校验。这一格没有引用别的资源，所以只查格式
@@ -66,8 +66,8 @@ app.get('/api/free-slots', (req, res) => {
   }
 
   // 取数据（存储层）→ 算（算法层）
-  const users = listUsers()
-  const events = listEventsByDate(date)
+  const users = await listUsers()
+  const events = await listEventsByDate(date)
   const slots = computeFreeSlots({ events, dayStart, dayEnd, minMinutes, bufferMinutes })
 
   // 按契约回包：slots 的 start / end 是完整本地时间戳，不带时区
@@ -92,13 +92,13 @@ app.get('/api/free-slots', (req, res) => {
 // ---------- 成员 ----------
 
 // GET /api/users：录入前的下拉框要用它拿成员列表
-app.get('/api/users', (req, res) => {
-  res.json({ success: true, data: listUsers() })
+app.get('/api/users', async (req, res) => {
+  res.json({ success: true, data: await listUsers() })
 })
 
 // POST /api/users：body 是 CreateUserInput（JSON）
 // 契约里的两个错误：400 NAME_EMPTY / 409 NAME_DUPLICATE
-app.post('/api/users', (req, res) => {
+app.post('/api/users', async (req, res) => {
   const body = req.body || {}
 
   // ① 格式校验归 HTTP 层：body 里有没有一个像样的 name
@@ -112,7 +112,7 @@ app.post('/api/users', (req, res) => {
     typeof body.color === 'string' && body.color.trim() ? body.color.trim() : undefined
 
   // ③ 唯一性校验归存储层：只有它知道库里已经有哪些成员
-  const user = addUser({ name, color })
+  const user = await addUser({ name, color })
   if (!user) {
     return fail(res, 409, 'NAME_DUPLICATE', `成员「${name}」已存在`)
   }
@@ -123,8 +123,8 @@ app.post('/api/users', (req, res) => {
 
 // DELETE /api/users/:id：删成员，连带删掉他名下的忙碌（口径见契约「删除成员」）
 // 响应只回 { id }，不回被连带删掉的那几条 —— 前端写完就重读，不需要明细
-app.delete('/api/users/:id', (req, res) => {
-  const removed = removeUser(req.params.id)
+app.delete('/api/users/:id', async (req, res) => {
+  const removed = await removeUser(req.params.id)
   if (!removed) {
     return fail(res, 404, 'NOT_FOUND', `成员「${req.params.id}」不存在`)
   }
@@ -135,29 +135,27 @@ app.delete('/api/users/:id', (req, res) => {
 
 // GET /api/events?date=：列出某人某天的忙碌，页面列出来才能删
 // 返回 EventWithUser（带 user），前端不用为了显示名字再发一次请求
-app.get('/api/events', (req, res) => {
+app.get('/api/events', async (req, res) => {
   const { date } = req.query
 
   if (typeof date !== 'string' || !DATE_RE.test(date)) {
     return fail(res, 400, 'INVALID_DATE', 'date 必须是 YYYY-MM-DD 格式')
   }
 
-  const list = listEventsByDate(date).map((e) => ({
-    ...e,
-    user: findUser(e.userId),
-  }))
+  // data.js 用 JOIN 把 user 一起带回来了，这里不用再拼一次
+  const list = await listEventsByDate(date)
 
   res.json({ success: true, data: list })
 })
 
 // POST /api/events：body 是 CreateEventInput（JSON）
 // 错误按契约的优先级来：① 人存不存在 → ② 参数格式
-app.post('/api/events', (req, res) => {
+app.post('/api/events', async (req, res) => {
   const body = req.body || {}
 
   // ① 存在性优先。契约第 236 行：同样的输入永远回同一个 code
   const userId = typeof body.userId === 'string' ? body.userId.trim() : ''
-  if (!findUser(userId)) {
+  if (!(await findUser(userId))) {
     return fail(res, 404, 'USER_NOT_FOUND', `userId「${userId}」对应的成员不存在`)
   }
 
@@ -181,7 +179,7 @@ app.post('/api/events', (req, res) => {
     return fail(res, 400, 'INVALID_PARAMETER', 'title 不能为空')
   }
 
-  const event = addEvent({ userId, date, startTime, endTime, title })
+  const event = await addEvent({ userId, date, startTime, endTime, title })
   if (!event) {
     return fail(res, 409, 'DUPLICATE_EVENT', '这一段忙碌已经录过了（同一天、起止完全相同）')
   }
@@ -189,8 +187,8 @@ app.post('/api/events', (req, res) => {
 })
 
 // DELETE /api/events/:id：删一条忙碌
-app.delete('/api/events/:id', (req, res) => {
-  const removed = removeEvent(req.params.id)
+app.delete('/api/events/:id', async (req, res) => {
+  const removed = await removeEvent(req.params.id)
   if (!removed) {
     return fail(res, 404, 'NOT_FOUND', `忙碌记录「${req.params.id}」不存在`)
   }

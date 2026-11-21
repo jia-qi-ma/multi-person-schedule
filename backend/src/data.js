@@ -1,72 +1,81 @@
 /**
- * 存储层：这一格先用内存里两条假数据，够验证算法就行。
+ * 存储层：PostgreSQL 版。
  *
- * 下一节换成 PostgreSQL 时，只改这个文件 —— freeSlots.js 和 index.js 一个字不动。
- * 这正是第 1 格说的「存储实现可替换」，也是检验分层有没有分对的方式：
- * 换存储的时候，需要改几个文件？
+ * 这一节就是来验证第 3 格那句「换存储只改这个文件」的。
+ * 结果：freeSlots.js 一个字没动（它算的是纯数据，不知道数据从哪来），
+ *      前端一个字没动（它只认契约）。
+ *
+ * 但有一个变化挡不住：所有函数都变成 async 了。
+ * 内存是同步的（数组里取一下就返回），数据库是异步的（要等结果回来）。
+ * 这会穿透到 index.js 的调用处（加 await），但路由、校验、错误码都不该动。
  */
 
-const users = [
-  { id: 'u_zhangsan', name: '张三', color: '#4f8ef7' },
-  { id: 'u_lisi', name: '李四', color: '#f2994a' },
-]
-
-// 基线两组数据：张三 09:00-11:00、李四 10:00-12:00
-// 算出来应该正好等于 shared/mock/free-slots.success.json 里那两段
-const events = [
-  {
-    id: 'e1',
-    userId: 'u_zhangsan',
-    date: '2026-11-15',
-    startTime: '09:00',
-    endTime: '11:00',
-    title: '组会',
-  },
-  {
-    id: 'e2',
-    userId: 'u_lisi',
-    date: '2026-11-15',
-    startTime: '10:00',
-    endTime: '12:00',
-    title: '实验课',
-  },
-]
+const { query } = require('./db')
 
 /** 新成员没指定颜色时，从这套调色板里轮着取一个（契约：color 可选，默认值归后端） */
 const COLOR_PALETTE = ['#4f8ef7', '#f2994a', '#27ae60', '#9b51e0', '#eb5757', '#2d9cdb']
 
-// 内存里的自增 id。下一节换 PostgreSQL，这行会交给数据库的自增主键 / UUID
-let userSeq = 0
-
-function nextUserId() {
-  userSeq += 1
-  return `u_${userSeq}`
-}
-
-// 忙碌记录的自增 id。从现有条数起算，避免和种子里的 e1 / e2 撞号
-let eventSeq = events.length
-
-function nextEventId() {
-  eventSeq += 1
-  return `e${eventSeq}`
-}
+/** PostgreSQL 的唯一约束冲突错误码。数据库不懂 HTTP，翻译交给上层 */
+const UNIQUE_VIOLATION = '23505'
 
 // ---------- 读 ----------
 
-function listUsers() {
-  return users
+async function listUsers() {
+  const { rows } = await query('SELECT id, name, color FROM users ORDER BY name')
+  return rows
 }
 
 /**
  * 按 id 找成员，找不到返回 null。
- * 录忙碌时要先确认「这个人在不在」，这个判断只有存储层做得出来。
+ *
+ * 用 id::text 比较而不是 id = $1：
+ * 前端传个非法值（比如 "abc"）时，直接比较会让 PostgreSQL 抛 22P02
+ * （uuid 格式错误），回一个 500；而我们要的是「找不到这个人」。
  */
-function findUser(id) {
-  return users.find((u) => u.id === id) || null
+async function findUser(id) {
+  const { rows } = await query('SELECT id, name, color FROM users WHERE id::text = $1', [id])
+  return rows[0] || null
 }
 
-function listEventsByDate(date) {
-  return events.filter((e) => e.date === date)
+/**
+ * 某人某天的忙碌，连成员信息一起带回来。
+ *
+ * 为什么用 JOIN 而不是先查 events、再对每条调 findUser：
+ * 那是 N+1 查询 —— 10 条记录要发 11 次 SQL。内存版没这个问题
+ * （数组里取一下就好），换成数据库后才浮出来。
+ *
+ * to_char 是为了对齐契约：数据库里 date 是 date 类型、time 是 time 类型，
+ * 直接读出来会被 pg 转成 JS Date，JSON 化就成了 "2026-11-15T00:00:00.000Z"。
+ * 契约要的是 "2026-11-15" 和 "09:00"，在 SQL 层裁干净最省事。
+ */
+async function listEventsByDate(date) {
+  const { rows } = await query(
+    `SELECT e.id,
+            e.user_id                        AS "userId",
+            to_char(e.date, 'YYYY-MM-DD')    AS date,
+            to_char(e.start_time, 'HH24:MI') AS "startTime",
+            to_char(e.end_time, 'HH24:MI')   AS "endTime",
+            e.title,
+            u.id    AS "user.id",
+            u.name  AS "user.name",
+            u.color AS "user.color"
+       FROM events e
+       JOIN users u ON u.id = e.user_id
+      WHERE e.date = $1::date
+      ORDER BY e.start_time`,
+    [date],
+  )
+
+  // pg 返回的是一行扁平对象（key 是 "user.id" 这种），这里组装成契约要的嵌套形状
+  return rows.map((r) => ({
+    id: r.id,
+    userId: r.userId,
+    date: r.date,
+    startTime: r.startTime,
+    endTime: r.endTime,
+    title: r.title,
+    user: { id: r['user.id'], name: r['user.name'], color: r['user.color'] },
+  }))
 }
 
 // ---------- 写 ----------
@@ -74,79 +83,75 @@ function listEventsByDate(date) {
 /**
  * 新增成员。
  *
- * 重名检查放在这里、不放在 index.js：只有存储层知道「库里已经有哪些人」。
- * 重名时不抛异常、只返回 null —— 这一层不认识 HTTP 状态码和 code，
- * 回什么错误由上层决定。存储只负责「存成了 / 没存成」。
+ * 重名检查不再写在应用层 —— users.name 上有 UNIQUE 约束，
+ * 插入冲突时 PostgreSQL 报 23505，这里翻译成 null。
+ * 仍然返回 null 表示「没存成」：存储层不认识 HTTP 状态码，回什么错误由上层决定。
  */
-function addUser({ name, color }) {
-  if (users.some((u) => u.name === name)) return null
-
-  const user = {
-    id: nextUserId(),
-    name,
-    color: color || COLOR_PALETTE[users.length % COLOR_PALETTE.length],
+async function addUser({ name, color }) {
+  // 颜色：没指定就从调色板里轮着取一个。数量来自数据库，不再是数组长度
+  let picked = color
+  if (!picked) {
+    const { rows } = await query('SELECT count(*)::int AS n FROM users')
+    picked = COLOR_PALETTE[rows[0].n % COLOR_PALETTE.length]
   }
-  users.push(user)
-  return user
+
+  try {
+    const { rows } = await query(
+      'INSERT INTO users (name, color) VALUES ($1, $2) RETURNING id, name, color',
+      [name, picked],
+    )
+    return rows[0]
+  } catch (err) {
+    if (err.code === UNIQUE_VIOLATION) return null
+    throw err // 别的错不是「重名」，往上报，让上层回 500
+  }
 }
 
 /**
- * 新增一条忙碌记录。
+ * 新增一条忙碌。
  *
- * 这里只负责存和查重，不判断「时间格式对不对」——
- * 格式只有 HTTP 层看得到，存在性由上层问 findUser。
+ * 查重（同一人 + 同一天 + 起止完全相同）也交给数据库的 UNIQUE 约束，
+ * 冲突时同样是 23505。应用层那道校验的价值是提前给人话错误，
+ * 数据库这道是最后防线：两个请求同时插入时，只有它是原子的。
  *
- * 查重口径（产品规则，2026-11-21 拍板）：同一人 + 同一天 + 起止完全相同 → 重复。
- * title 不参与比较：那个时段已经被占住了，换个事由再录一次也是误操作。
- * 命中时返回 null，由上层决定回 409 DUPLICATE_EVENT —— 存储层不认识 HTTP 码。
+ * 这里只负责存和翻译，不判断时间格式 —— 格式只有 HTTP 层看得到。
  */
-function addEvent({ userId, date, startTime, endTime, title }) {
-  const duplicated = events.some(
-    (e) =>
-      e.userId === userId && e.date === date && e.startTime === startTime && e.endTime === endTime,
-  )
-  if (duplicated) return null
-
-  const event = {
-    id: nextEventId(),
-    userId,
-    date,
-    startTime,
-    endTime,
-    title,
+async function addEvent({ userId, date, startTime, endTime, title }) {
+  try {
+    const { rows } = await query(
+      `INSERT INTO events (user_id, date, start_time, end_time, title)
+       VALUES ($1, $2::date, $3::time, $4::time, $5)
+       RETURNING id,
+                 user_id                        AS "userId",
+                 to_char(date, 'YYYY-MM-DD')    AS date,
+                 to_char(start_time, 'HH24:MI') AS "startTime",
+                 to_char(end_time, 'HH24:MI')   AS "endTime",
+                 title`,
+      [userId, date, startTime, endTime, title],
+    )
+    return rows[0]
+  } catch (err) {
+    if (err.code === UNIQUE_VIOLATION) return null
+    throw err
   }
-  events.push(event)
-  return event
 }
 
-/** 删一条忙碌记录。删不到返回 null，回什么错误由上层决定（跟 addUser 一个套路） */
-function removeEvent(id) {
-  const index = events.findIndex((e) => e.id === id)
-  if (index === -1) return null
-  return events.splice(index, 1)[0]
+/** 删一条忙碌。删不到返回 null，回什么错误由上层决定（跟 addUser 一个套路） */
+async function removeEvent(id) {
+  const { rows } = await query('DELETE FROM events WHERE id::text = $1 RETURNING id', [id])
+  return rows[0] || null
 }
 
 /**
- * 删一个成员，连带删掉他名下的所有忙碌记录（2026-11-21 拍板）。
+ * 删一个成员。
  *
- * 为什么级联：忙碌记录靠 userId 依附于成员，人没了记录就无所归属。
- * 代价是「删人」比看上去重 —— 他占的时段一起消失，共同空闲会变多，
- * 所以前端删之前要二次确认，这句也写进了契约的「删除成员的口径」。
- *
- * 删不到返回 null，回什么错误由上层决定（跟 removeEvent 一个套路）。
+ * 注意这里只有一条 DELETE —— 原先「先清掉他名下忙碌」那几行全没了。
+ * 因为 ON DELETE CASCADE 写在表定义里，数据库自己会级联。
+ * 好处不只是代码短：应用层想漏都漏不掉，并发下也不会漏。
  */
-function removeUser(id) {
-  const index = users.findIndex((u) => u.id === id)
-  if (index === -1) return null
-  const [removed] = users.splice(index, 1)
-
-  // 用 filter 重建再原地写回：边遍历边 splice 会漏掉紧跟其后的那一条。
-  // events 是 const，不能整个换成新数组，所以清空后 push 回去。
-  const kept = events.filter((e) => e.userId !== id)
-  events.length = 0
-  events.push(...kept)
-
-  return removed
+async function removeUser(id) {
+  const { rows } = await query('DELETE FROM users WHERE id::text = $1 RETURNING id', [id])
+  return rows[0] || null
 }
 
 module.exports = { listUsers, listEventsByDate, addUser, findUser, addEvent, removeEvent, removeUser }
