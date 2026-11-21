@@ -1,5 +1,7 @@
-// 数据来源只写这一处：骨架阶段读 Mock，后端接好后改这一行即可
-const DATA_SOURCE = '/free-slots.success.json'
+// 数据来源只写这一处：骨架阶段读 Mock，后端接好后改这一行即可。
+// 现在指向真接口（经 vite 转发到 localhost:3001），页面其余代码一行没动。
+// 日期先写死；以后接日期选择器时，把它换成用户选中的那一天。
+const DATA_SOURCE = '/api/free-slots?date=2026-11-15'
 
 const meta = document.querySelector('#meta')
 const list = document.querySelector('#slots')
